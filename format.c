@@ -16,6 +16,18 @@ static inline void write_tags(kstring_t *s, const mb_hit_t *p)
 	kom_sprintf_lite(s, "\tNM:i:%d\tAS:i:%d\tms:i:%d\tmd:i:%d", nm, p->p->dp_score, p->p->dp_max0, p->p->dp_max - p->p->dp_max2);
 }
 
+/* Bismark XR/XG. Under directional --meth: XR follows mate (R1=CT,
+ * R2=GA, SE=CT); XG = "GA" iff (is_R2 XOR r->rev), reproducing Bismark's
+ * (XR,XG) -> {OT,OB,CTOT,CTOB} encoding. */
+static inline void write_meth_strand_tags(kstring_t *s, int n_seg, int seg_idx, const mb_hit_t *r)
+{
+	int is_r2 = (n_seg == 2 && seg_idx == 1);
+	int xg_is_ga = is_r2 ^ r->rev;
+	const char *xr = is_r2 ? "GA" : "CT";
+	const char *xg = xg_is_ga ? "GA" : "CT";
+	kom_sprintf_lite(s, "\tXR:Z:%s\tXG:Z:%s", xr, xg);
+}
+
 void mb_fmt_paf(kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, const mb_hit_t *p, uint64_t opt_flag, int n_seg, int seg_idx)
 {
 	kom_sprintf_lite(s, "%s", t->name);
@@ -289,6 +301,7 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 	if (n_seg > 2) kom_sprintf_lite(s, "\tFI:i:%d", seg_idx);
 	if (r) {
 		write_tags(s, r);
+		if (opt_flag & MB_F_METH) write_meth_strand_tags(s, n_seg, seg_idx, r);
 		// MC:Z mate CIGAR and MQ:i mate MAPQ; r_next is the mate's primary (see above).
 		if (n_seg > 1 && r_next && r_next->p && r_next->p->n_cigar > 0 && mate_qlen > 0) {
 			kom_sprintf_lite(s, "\tMC:Z:");

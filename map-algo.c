@@ -234,6 +234,33 @@ int mb_places_colocate(const mb_place_t *a, const mb_place_t *b, int lift_tol)
 	return 0;
 }
 
+/* Does ALT contig `alt_tid`'s .alt mapping cover primary position `pos` on
+ * `pri_tid`?  An ALT contig is, by GRCh38 construction, an alternate of a
+ * specific primary REGION; its lift blocks (with internal indel gaps) span
+ * [min pri_st, max pri_en) on each primary contig they touch.  Containment is
+ * tested in that OVERALL span (gaps included) so a position that falls in an
+ * .alt deletion gap -- or whose ALT twin lifts there through an insertion hole
+ * -- is still recognized as inside the ALT's primary region.  This is the
+ * .alt-established correspondence used to fold an ALT twin onto a primary hit
+ * the per-base lift could not co-locate (mb_reconcile_alt step 2b). */
+static int mb_alt_covers_primary(const l2b_t *l2b, int64_t alt_tid, int64_t pri_tid, int64_t pos)
+{
+	const l2b_ctg_t *ctg;
+	uint32_t b;
+	int64_t lo = -1, hi = -1;
+	if (alt_tid < 0 || alt_tid >= (int64_t)l2b->n_ctg) return 0;
+	ctg = &l2b->ctg[alt_tid];
+	if (!ctg->is_alt || ctg->n_lift == 0) return 0;
+	for (b = 0; b < ctg->n_lift; ++b) {
+		const l2b_lift_t *blk = &ctg->lift[b];
+		if (blk->pri_tid != pri_tid) continue;
+		if (lo < 0 || (int64_t)blk->pri_st < lo) lo = (int64_t)blk->pri_st;
+		if (hi < 0 || (int64_t)blk->pri_en > hi) hi = (int64_t)blk->pri_en;
+	}
+	if (lo < 0) return 0;                 /* contig does not map to pri_tid */
+	return pos >= lo && pos < hi;
+}
+
 void mb_idx_destroy(mb_idx_t *idx)
 {
 	if (idx == 0) return;
@@ -738,15 +765,64 @@ void mb_reconcile_alt(void *km, const l2b_t *l2b, int n_hit, mb_hit_t *hit, int 
 		}
 	}
 
-	/* 3. representative per group = max dp-score (ties: non-ALT, then larger
-	 *    hash) -- determined AFTER the new grouping. */
+	/* 2b. ALT-ALTERNATE fold-in (placement-based, via the .alt correspondence).
+	 *
+	 * The per-base lift in step 2 groups an ALT twin with its primary only where
+	 * the lift is EXACT.  It fails when an .alt-internal structural indel
+	 * displaces the ALT twin's lifted placement beyond lift_tol, or drops the ALT
+	 * footprint into an insertion HOLE (unliftable) -- leaving the ALT twin as a
+	 * co-equal group representative that both steals the SAM-primary slot (read
+	 * placed on the ALT contig) and dilutes the primary's MAPQ to 0.  Recognize,
+	 * via the .alt RECORD (this ALT contig is an alternate of a specific primary
+	 * region), that an ALT hit which (a) shares read bases with a non-ALT hit
+	 * -- same fragment, not a chimeric segment -- and (b) whose contig maps over
+	 * that non-ALT hit's primary locus, is an ALTERNATE PLACEMENT of that locus.
+	 * Fold its whole group into the non-ALT hit's group.
+	 *
+	 * Applied ONLY to an ALT hit whose group has NO non-ALT member (the exact
+	 * lift already failed to co-locate it).  Paralog-safe: only ALT-vs-non-ALT
+	 * folds; two genuine primary loci are both non-ALT and never merge here, so a
+	 * truly ambiguous multi-mapper keeps MAPQ 0.  This does NOT discard ALT hits
+	 * categorically -- an ALT hit with no overlapping primary (a read genuinely
+	 * from an ALT-only region) stays an independent representative. */
+	{
+		uint8_t *grp_has_pri = Kcalloc(km, uint8_t, n_hit);
+		if (grp_has_pri) {
+			for (i = 0; i < n_hit; ++i)
+				if (!hit[i].is_alt) grp_has_pri[grp[i]] = 1;
+			for (i = 0; i < n_hit; ++i) {
+				if (!hit[i].is_alt) continue;            /* fold ALT hits only */
+				if (grp_has_pri[grp[i]]) continue;        /* already grouped with a primary */
+				for (j = 0; j < n_hit; ++j) {
+					int old, neu, t;
+					if (hit[j].is_alt) continue;          /* into a non-ALT hit */
+					if (grp[j] == grp[i]) continue;
+					if (!mb_qspan_overlap(&hit[i], &hit[j])) continue;
+					if (!mb_alt_covers_primary(l2b, hit[i].tid, pl[j].pri_tid, pl[j].lifted_st))
+						continue;
+					old = grp[i]; neu = grp[j];
+					for (t = 0; t < n_hit; ++t) if (grp[t] == old) grp[t] = neu;
+					grp_has_pri[grp[i]] = 1;
+					break;
+				}
+			}
+			kfree(km, grp_has_pri);
+		}
+	}
+
+	/* 3. representative per group -- determined AFTER the new grouping.  Within a
+	 *    group every member is the SAME primary locus, so the primary-assembly
+	 *    (non-ALT) member is the representative the read is reported on: an ALT
+	 *    copy is an ALTERNATE of this locus, never a "better" locus, so a non-ALT
+	 *    member outranks an ALT member REGARDLESS of DP score.  DP score (then
+	 *    larger hash) decides only between members of the same is_alt class. */
 	for (i = 0; i < n_hit; ++i) rep[i] = grp[i];   /* seed with the label index */
 	for (i = 0; i < n_hit; ++i) {
 		int g = grp[i], r = rep[g];
 		int32_t si = mb_hit_dpscore(&hit[i]), sr = mb_hit_dpscore(&hit[r]);
 		int better;
-		if (si != sr) better = (si > sr);
-		else if (hit[i].is_alt != hit[r].is_alt) better = (!hit[i].is_alt); /* prefer non-ALT */
+		if (hit[i].is_alt != hit[r].is_alt) better = (!hit[i].is_alt); /* prefer non-ALT */
+		else if (si != sr) better = (si > sr);
 		else better = (hit[i].hash > hit[r].hash);
 		if (better) rep[g] = i;
 	}

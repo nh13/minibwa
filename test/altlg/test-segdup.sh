@@ -44,7 +44,7 @@ echo "[test-segdup] LIFT locus is chrP POS=$LIFT_POS1; max_occ (-c) = $C"
 
 # --- RED: projection disabled ---
 echo "== RED: MB_NO_ALT_PROJECT=1 (no projection) =="
-MB_NO_ALT_PROJECT=1 "$MINIBWA" mem -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
+"$MINIBWA" mem --dbg-no-alt-proj -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
     2>/dev/null > "$TMPD/red.sam"
 mawk '$1 !~ /^@/' "$TMPD/red.sam" > "$TMPD/red.body.sam"
 [ -s "$TMPD/red.body.sam" ] || fail "RED: no alignments emitted"
@@ -83,17 +83,21 @@ if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
     "$MINIBWA" index "$CHRM_FA" 2>/dev/null
     # SE: default vs seam-off must be byte-identical (no ALT anchors either way).
     "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-on.sam"
-    MB_NO_ALT_PROJECT=1 "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-off.sam"
+    "$MINIBWA" mem --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-off.sam"
     [ -s "$TMPD/chrM-se-on.sam" ] || fail "chrM SE baseline: empty output"
-    cmp -s "$TMPD/chrM-se-on.sam" "$TMPD/chrM-se-off.sam" \
-        || fail "chrM SE baseline: projection changed output without .alt"
-    ok "chrM SE baseline: byte-identical with/without projection (no .alt => inert)"
+    grep -v '^@' "$TMPD/chrM-se-on.sam" > "$TMPD/chrM-se-on.body" || true
+    grep -v '^@' "$TMPD/chrM-se-off.sam" > "$TMPD/chrM-se-off.body" || true
+    cmp -s "$TMPD/chrM-se-on.body" "$TMPD/chrM-se-off.body" \
+        || fail "chrM SE baseline: projection changed alignments without .alt"
+    ok "chrM SE baseline: identical alignments with/without projection (no .alt => inert)"
     if [ -f "$CHRM_R2" ]; then
         "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-on.sam"
-        MB_NO_ALT_PROJECT=1 "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-off.sam"
-        cmp -s "$TMPD/chrM-pe-on.sam" "$TMPD/chrM-pe-off.sam" \
-            || fail "chrM PE baseline: projection changed output without .alt"
-        ok "chrM PE baseline: byte-identical with/without projection (no .alt => inert)"
+        "$MINIBWA" mem --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-off.sam"
+        grep -v '^@' "$TMPD/chrM-pe-on.sam" > "$TMPD/chrM-pe-on.body" || true
+        grep -v '^@' "$TMPD/chrM-pe-off.sam" > "$TMPD/chrM-pe-off.body" || true
+        cmp -s "$TMPD/chrM-pe-on.body" "$TMPD/chrM-pe-off.body" \
+            || fail "chrM PE baseline: projection changed alignments without .alt"
+        ok "chrM PE baseline: identical alignments with/without projection (no .alt => inert)"
     else
         echo "  skip: chrM R2 not found ($CHRM_R2)"
     fi

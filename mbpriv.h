@@ -13,6 +13,8 @@
 #define MB_DBG_QNAME       (0x8LL)
 #define MB_DBG_ALN_PE      (0x10LL)
 #define MB_DBG_AN_POS      (0x20LL)
+#define MB_DBG_NO_ALT_PROJ (0x40LL)   // --dbg-no-alt-proj: ablate ALT-seed->primary projection (testing)
+#define MB_DBG_ALT_PROJ    (0x80LL)   // --dbg-alt-proj: trace projected primary anchors (testing)
 
 #define MB_SEED_LONG_JOIN  0x1
 #define MB_SEED_IGNORE     0x2

@@ -51,7 +51,7 @@ echo "[test-segdup-rev] expected projected locus: chrP POS=$LIFT_POS1 strand=- (
 
 # --- RED: projection disabled -> no projected anchor at all ---
 echo "== RED: MB_NO_ALT_PROJECT=1 (no projection) =="
-MB_NO_ALT_PROJECT=1 MB_PROJ_TRACE=1 "$MINIBWA" mem -c "$C" --outn=999 \
+"$MINIBWA" mem --dbg-no-alt-proj --dbg-alt-proj -c "$C" --outn=999 \
     "$TMPD/ref.fa" "$TMPD/reads.fq" 2>"$TMPD/red.err" >/dev/null
 red_pos=$(proj_pos "$TMPD/red.err" -)
 [ -z "$red_pos" ] || fail "RED: projection emitted a trace with seam off (got POS=$red_pos)"
@@ -59,7 +59,7 @@ ok "RED: no projected anchor with projection disabled"
 
 # --- GREEN: projection enabled (default) ---
 echo "== GREEN: projection enabled (default) =="
-MB_PROJ_TRACE=1 "$MINIBWA" mem -c "$C" --outn=999 \
+"$MINIBWA" mem --dbg-alt-proj -c "$C" --outn=999 \
     "$TMPD/ref.fa" "$TMPD/reads.fq" 2>"$TMPD/green.err" >/dev/null
 echo "  MB_PROJ traces (GREEN):"
 grep '^MB_PROJ' "$TMPD/green.err" | sed 's/^/    /' || true
@@ -71,7 +71,7 @@ echo "  expected POS=$LIFT_POS1 strand=-, actual POS=$green_pos strand=-"
 ok "GREEN: reverse ALT seed projected to the CORRECT primary locus (POS=$LIFT_POS1, strand -)"
 
 # Determinism.
-MB_PROJ_TRACE=1 "$MINIBWA" mem -c "$C" --outn=999 \
+"$MINIBWA" mem --dbg-alt-proj -c "$C" --outn=999 \
     "$TMPD/ref.fa" "$TMPD/reads.fq" 2>"$TMPD/green2.err" >/dev/null
 [ "$(proj_pos "$TMPD/green2.err" -)" = "$green_pos" ] \
     || fail "GREEN: reverse projected POS not deterministic across runs"

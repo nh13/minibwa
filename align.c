@@ -773,7 +773,12 @@ static int mb_align1_inv(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int 
 	if (ql < opt->min_chain_score || ql > opt->max_gap) return 0;
 	if (tl < opt->min_chain_score || tl > opt->max_gap) return 0;
 
-	if (!r1->rev) mt = l2b_meth_rev(mt); // TODO: check if this is correct
+	// mt is the read's base conversion (same value passed to mb_align1, which
+	// flips it locally for its own segment via `if (r->rev)`). The inverted
+	// segment maps to strand r_inv->rev = !r1->rev, so flip the conversion when
+	// !r1->rev, mirroring the mb_align1 / mb_matesw_core convention of flipping
+	// mt whenever the aligned segment is reverse-strand.
+	if (!r1->rev) mt = l2b_meth_rev(mt);
 	ksw_gen_nt4_mat(mat, opt->a, opt->b, opt->b_ts, opt->b_ambi, (int)mt);
 
 	tseq = (uint8_t*)kmalloc(km, tl);

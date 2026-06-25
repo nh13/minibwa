@@ -58,7 +58,7 @@ typedef struct {
 	int32_t best_n;
 	// alignment options
 	int32_t a, b;     // match, mismatch
-	int32_t b_ts;     // transition mismatch
+	int32_t b_ts;     // transition mismatch penalty; 0 by default and no CLI flag, so inactive unless set programmatically (meth mode still forces the C>T/G>A cell to a match via mt)
 	int32_t b_ambi;   // ambiguous mismatch
 	int32_t q, q2;    // gap open, long gap open
 	int32_t e, e2;    // gap extension, long gap extension

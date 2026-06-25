@@ -26,6 +26,7 @@
 #define MB_F_NO_PAIRING       (0x10000LL)
 #define MB_F_METH             (0x20000LL)   // methylation mode
 #define MB_F_ALT_RECORDS      (0x40000LL)   // emit ALT-contig hits with full SEQ
+#define MB_F_PE_PAIR_PRI      (0x80000LL)   // SAM primary follows the PE-pair-chosen endpoint (opt-in)
 
 #define MB_CIGAR_MATCH      0
 #define MB_CIGAR_INS        1

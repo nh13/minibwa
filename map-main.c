@@ -305,6 +305,7 @@ static ko_longopt_t long_options[] = {
 	{ "alt",          ko_required_argument, 312 },
 	{ "alt-records",  ko_no_argument,       313 },
 	{ "alt-lift-tol", ko_required_argument, 314 },
+	{ "pe-pair-primary", ko_no_argument,   315 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -355,6 +356,7 @@ static int usage(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
 	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
 	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
+	fprintf(fp, "    --pe-pair-primary  SAM primary follows the PE-pair-chosen endpoint (off by default)\n");
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -5               take the alignment with the smallest query position as primary\n");
@@ -457,6 +459,8 @@ int main_map(int argc, char *argv[])
 		} else if (c == 314) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
+		} else if (c == 315) { // --pe-pair-primary
+			mo.flag |= MB_F_PE_PAIR_PRI;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor

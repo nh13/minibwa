@@ -519,6 +519,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	mb_pairaux_t paux;
 	mb_hit_t *h[2];
 	int32_t seed_ratio[2], min_seed_ratio;
+	int32_t pri_idx[2] = {-1, -1}; /* PE-pair-chosen primary endpoint per read; -1 => fall back to per-read order */
 
 	if (n_hit[0] == 0 && n_hit[1] == 0) return;
 	seed_ratio[0] = n_hit[0] > 0? hit[0][0].seed_ratio : 255;
@@ -573,6 +574,18 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	if (paux.score >= score_se - opt->pen_unpair * opt->a) {
 		int32_t mapq_pe, score2 = paux.sub_sc;
 		double identity;
+		/* The pairing chose these endpoints (DP + insert-size consistency); the
+		 * re-rooting below makes each its group representative.  Record them so
+		 * mb_set_sam_pri emits the pair-chosen copy as the SAM primary instead of
+		 * the first-by-DP/hash representative -- the two differ for near-equal
+		 * paralog copies (subtelomeric/segdup), where the per-read order would
+		 * otherwise emit a copy inconsistent with the mate.  Opt-in
+		 * (--pe-pair-primary): off by default so plain `minibwa mem` stays
+		 * byte-identical to baseline. */
+		if (opt->flag & MB_F_PE_PAIR_PRI) {
+			pri_idx[0] = paux.i[0];
+			pri_idx[1] = paux.i[1];
+		}
 		mb_sync_high_cov(n_hit[0], hit[0]);
 		mb_sync_high_cov(n_hit[1], hit[1]);
 		identity = (double)(h[0]->mlen + h[1]->mlen) / (h[0]->blen + h[1]->blen);
@@ -623,6 +636,6 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 		}
 	}
 end_pairing:
-	mb_set_sam_pri(n_hit[0], hit[0], !!(opt->flag & MB_F_PRIMARY5));
-	mb_set_sam_pri(n_hit[1], hit[1], !!(opt->flag & MB_F_PRIMARY5));
+	mb_set_sam_pri(n_hit[0], hit[0], !!(opt->flag & MB_F_PRIMARY5), pri_idx[0]);
+	mb_set_sam_pri(n_hit[1], hit[1], !!(opt->flag & MB_F_PRIMARY5), pri_idx[1]);
 }

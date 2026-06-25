@@ -260,6 +260,7 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 	uint64_t i;
 
 	/* Reset: free any existing lift blocks and clear flags. */
+	l2b->n_alt = 0;
 	for (i = 0; i < l2b->n_ctg; ++i) {
 		free(l2b->ctg[i].lift);
 		l2b->ctg[i].lift = 0;
@@ -381,6 +382,7 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 
 	free(line);
 	fclose(fp);
+	l2b->n_alt = n_alt;
 	return n_alt;
 }
 

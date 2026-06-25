@@ -74,6 +74,13 @@ void mb_idx_set_alt(mb_idx_t *idx, const char *fn)
 	if (idx && idx->l2b) l2b_set_alt(idx->l2b, fn);
 }
 
+/* Whether an ALT span-lift is loaded (via --alt or an auto-detected <idx>.alt).
+ * Used to resolve the auto default of --pe-pair-primary after index load. */
+int mb_idx_has_alt(const mb_idx_t *idx)
+{
+	return idx && idx->l2b && idx->l2b->n_alt > 0;
+}
+
 /* Reference (target) span the hit's CIGAR consumes, as a half-open interval on
  * h->tid.  Post-DP (h->p != NULL) this walks the CIGAR's reference-consuming ops
  * (M/=/X/D/N) starting at h->ts; pre-DP (h->p == NULL) it falls back to the

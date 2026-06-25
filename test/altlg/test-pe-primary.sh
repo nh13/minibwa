@@ -1,13 +1,17 @@
 #!/bin/sh
-# Integration test for the opt-in PE-pair-primary selection (--pe-pair-primary).
+# Integration test for the PE-pair-primary selection (--pe-pair-primary[=yes|no]),
+# which is auto-on when a .alt is loaded and off otherwise.
 #
 # r-para's R1 maps equally to two paralog copies (copyA=chrP[500,650),
 # copyB=chrP[2500,2650)); its mate R2 is unique near copyA, so the PE pairing
-# chooses copyA.  Assertions:
-#   - WITH --pe-pair-primary: R1 SAM primary is at copyA (chrP pos in [490,660)),
-#     i.e. the mate-consistent copy -- NOT copyB.
-#   - default (no flag): chrM PE output is byte-identical across runs (the opt-in
-#     selection is off, so plain `minibwa mem` is unchanged).
+# chooses copyA.  The fixture ships a sibling ref.fa.alt (auto-detected).
+# Assertions:
+#   - --pe-pair-primary=no: R1 SAM primary is at copyB (per-read order, the
+#     mate-INconsistent copy) -- the selection is off.
+#   - AUTO (no flag, .alt auto-detected) and explicit --pe-pair-primary: R1 SAM
+#     primary is at copyA (mate-consistent) -- selection on.
+#   - no .alt (chrM): PE output is byte-identical across runs, so plain
+#     `minibwa mem` (pair-primary auto-resolves off) is unchanged from baseline.
 #
 # Usage: test/altlg/test-pe-primary.sh [<minibwa-dir>]
 set -eu
@@ -36,23 +40,37 @@ echo "[test-pe-primary] building fixture ..."
 in_copyA() { [ "$1" -ge 490 ] && [ "$1" -lt 660 ]; }   # copyA window (~chrP:501)
 in_copyB() { [ "$1" -ge 2490 ] && [ "$1" -lt 2660 ]; } # copyB window (~chrP:2501)
 
-echo "[test-pe-primary] mapping DEFAULT (no flag) ..."
-"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
+echo "[test-pe-primary] mapping --pe-pair-primary=no (forced off) ..."
+"$MINIBWA" mem --outn=50 --pe-pair-primary=no "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
     2>/dev/null | mawk '$1 !~ /^@/' > "$TMPD/off.sam"
-[ -s "$TMPD/off.sam" ] || fail "no alignments emitted (default)"
-echo "----- r-para records (default) -----"
+[ -s "$TMPD/off.sam" ] || fail "no alignments emitted (=no)"
+echo "----- r-para records (--pe-pair-primary=no) -----"
 mawk '$1=="r-para"{printf "  flag=%d %s:%s mapq=%s\n",$2,$3,$4,$5}' "$TMPD/off.sam"
 off_pos=$(r1_primary_pos "$TMPD/off.sam" r-para)
-[ -n "$off_pos" ] || fail "no R1 primary record for r-para (default)"
-# The bug: default per-read order emits the higher-scoring (exact) copyB, which
-# is NOT mate-consistent.  Locks that the flag is actually doing something.
+[ -n "$off_pos" ] || fail "no R1 primary record for r-para (=no)"
+# Forced off: per-read order emits the higher-scoring (exact) copyB, which is NOT
+# mate-consistent.  Locks that the selection is actually doing something.
 if in_copyB "$off_pos"; then
-    ok "default emits copyB (chrP:$off_pos) -- the mate-INconsistent copy (bug present without flag)"
+    ok "--pe-pair-primary=no emits copyB (chrP:$off_pos) -- the mate-INconsistent copy (selection off)"
 else
-    fail "default R1 primary at chrP:$off_pos; fixture expected copyB (~2501) to win by score without the flag"
+    fail "--pe-pair-primary=no R1 primary at chrP:$off_pos; fixture expected copyB (~2501) to win by score"
 fi
 
-echo "[test-pe-primary] mapping WITH --pe-pair-primary ..."
+# AUTO default: the fixture ships a sibling ref.fa.alt (auto-detected), so the
+# PE-pair-primary selection is on by default -- no flag needed.  This locks the
+# auto-on-under-.alt behaviour.
+echo "[test-pe-primary] mapping AUTO (no flag; sibling .alt auto-detected) ..."
+"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
+    2>/dev/null | mawk '$1 !~ /^@/' > "$TMPD/auto.sam"
+auto_pos=$(r1_primary_pos "$TMPD/auto.sam" r-para)
+[ -n "$auto_pos" ] || fail "no R1 primary record for r-para (auto)"
+if in_copyA "$auto_pos"; then
+    ok "auto (no flag, .alt present) emits copyA (chrP:$auto_pos) -- pair-primary on by default under .alt"
+else
+    fail "auto R1 primary at chrP:$auto_pos; expected copyA in [490,660) (auto-on under .alt)"
+fi
+
+echo "[test-pe-primary] mapping WITH --pe-pair-primary (explicit on) ..."
 "$MINIBWA" mem --outn=50 --pe-pair-primary "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
     2>/dev/null | mawk '$1 !~ /^@/' > "$TMPD/on.sam"
 [ -s "$TMPD/on.sam" ] || fail "no alignments emitted"

@@ -185,7 +185,7 @@ static void mb_anchor_dedup(mb_anchor_v *v) // NB: assuming sorted by tpos
  * loci than this is in a massive repeat family and will be MAPQ 0 regardless, so
  * stopping early is correctness-neutral.  The bound exists only to keep the
  * per-locus bookkeeping table on the stack.  Both caps are silent in production
- * but counted and emitted under MB_PROJ_TRACE so truncation is observable. */
+ * but counted and emitted under --dbg-alt-proj so truncation is observable. */
 #define MB_PROJ_MAX_LOCI 256
 
 /* Project ALT-contig anchors onto the primary assembly so a segduplicated
@@ -207,16 +207,12 @@ static void mb_anchor_dedup(mb_anchor_v *v) // NB: assuming sorted by tpos
 static void mb_anchor_project_alt(void *km, const l2b_t *l2b, int32_t qlen, mb_anchor_v *v)
 {
 	int64_t i, n0 = v->n;
-	/* Test-only seam: MB_NO_ALT_PROJECT=1 disables projection so the segdup
-	 * regression test can compare WITH vs WITHOUT projection using a single
-	 * binary.  Shipped behaviour is unconditional (gated only on per-anchor
-	 * is_alt below); production never sets this. */
-	static int8_t disabled = -1;
-	if (disabled < 0) { const char *e = getenv("MB_NO_ALT_PROJECT"); disabled = (e && *e && *e != '0') ? 1 : 0; }
-	if (disabled) return;
-	/* Test-only probe seam (see the MB_PROJ trace below); cached like above. */
-	static int8_t proj_trace = -1;
-	if (proj_trace < 0) { const char *e = getenv("MB_PROJ_TRACE"); proj_trace = (e && *e && *e != '0') ? 1 : 0; }
+	/* --dbg-no-alt-proj ablates projection so the segdup regression tests can
+	 * compare WITH vs WITHOUT projection from a single binary; production leaves
+	 * it off (projection is unconditional, gated only on per-anchor is_alt). */
+	if (kom_dbg_flag & MB_DBG_NO_ALT_PROJ) return;
+	/* --dbg-alt-proj traces each projected primary anchor (see the trace below). */
+	int proj_trace = (kom_dbg_flag & MB_DBG_ALT_PROJ) != 0;
 	/* Per-locus cap bookkeeping: a tiny rolling table keyed by the projected
 	 * sid (pri_tid<<1|folded_rev) AND the projected forward last base
 	 * (fold_last), so the cap is per distinct projected LOCUS rather than per
@@ -311,13 +307,12 @@ static void mb_anchor_project_alt(void *km, const l2b_t *l2b, int32_t qlen, mb_a
 		new_tpos = pri_ctg->off * 2 + pri_ctg->len * folded_rev + fold_last;
 		new_sid = (int32_t)(pri_tid << 1 | folded_rev);
 
-		/* Test-only probe seam: MB_PROJ_TRACE=1 emits one line per projected
-		 * anchor giving the primary contig, 1-based POS, and projected strand --
-		 * the load-bearing coordinates produced by the reverse-span recovery and
-		 * forward-frame fold (Fix 1+2).  This is observable even when the
-		 * resulting alignment is masked at SAM level by identical-scoring paralog
-		 * collapse (reverse RC repeats), so a fixture can assert the projected
-		 * locus directly.  Production never sets this; it is pure diagnostics. */
+		/* --dbg-alt-proj emits one line per projected anchor giving the primary
+		 * contig, 1-based POS, and projected strand -- the load-bearing
+		 * coordinates produced by the reverse-span recovery and forward-frame
+		 * fold.  Observable even when the resulting alignment is masked at SAM
+		 * level by identical-scoring paralog collapse (reverse RC repeats), so a
+		 * fixture can assert the projected locus directly.  Diagnostics only. */
 		if (proj_trace) {
 			int64_t pri_pos1 = fold_last - q->len + 2; /* 1-based POS = (ts 0-based)+1 = (fold_last+1-len)+1 */
 			fprintf(stderr, "MB_PROJ\t%s\t%lld\t%c\tlen=%d\n",

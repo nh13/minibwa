@@ -358,6 +358,8 @@ static ko_longopt_t long_options[] = {
 	{ "dbg-qname",    ko_no_argument,       604 },
 	{ "dbg-aln-pe",   ko_no_argument,       605 },
 	{ "dbg-an-pos",   ko_no_argument,       606 }, // anchor position
+	{ "dbg-no-alt-proj", ko_no_argument,    607 }, // ablate ALT->primary projection (testing)
+	{ "dbg-alt-proj", ko_no_argument,       608 }, // trace projected primary anchors (testing)
 	{ "version",      ko_no_argument,       901 },
 	{ "help",         ko_no_argument,       902 },
 	{ 0, 0, 0 }
@@ -544,6 +546,10 @@ int main_map(int argc, char *argv[])
 			kom_dbg_flag |= MB_DBG_ALN_PE;
 		} else if (c == 606) { // --dbg-an-pos
 			kom_dbg_flag |= MB_DBG_AN_POS;
+		} else if (c == 607) { // --dbg-no-alt-proj
+			kom_dbg_flag |= MB_DBG_NO_ALT_PROJ;
+		} else if (c == 608) { // --dbg-alt-proj
+			kom_dbg_flag |= MB_DBG_ALT_PROJ;
 		} else if (c == 'K') {
 			mo.mb_size = mo.max_mb_size = kom_parse_num(o.arg, &s);
 			if (*s == ',') mo.max_mb_size = kom_parse_num(s + 1, &s);

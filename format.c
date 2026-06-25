@@ -268,7 +268,8 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 		if (t->qual) sam_write_sq(s, t->qual, t->l_seq, 0, 0);
 		else kom_sprintf_lite(s, "*");
 	} else {
-		if ((flag & 0x900) == 0 || (opt_flag & MB_F_SUPP_SOFT)) {
+		if ((flag & 0x900) == 0 || (opt_flag & MB_F_SUPP_SOFT)
+		    || ((opt_flag & MB_F_ALT_RECORDS) && r->is_alt)) {
 			sam_write_sq(s, t->seq, t->l_seq, r->rev, r->rev);
 			kom_sprintf_lite(s, "\t");
 			if (t->qual) sam_write_sq(s, t->qual, t->l_seq, r->rev, 0);

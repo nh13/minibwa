@@ -215,7 +215,8 @@ static void *worker_pipeline(void *shared, int step, void *in)
 					int32_t n_sec = 0;
 					for (j = 0; j < s->n_hit[i]; ++j) {
 						const mb_hit_t *h = &s->hit[i][j];
-						if (h->parent == h->id || n_sec < opt->out_n)
+						if (h->parent == h->id || n_sec < opt->out_n
+						    || ((opt->flag & MB_F_ALT_RECORDS) && h->is_alt))
 							mb_format(km, &out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], j, opt->flag, i - seg_st, mate_qlen);
 						n_sec += (h->parent != h->id);
 					}
@@ -301,6 +302,9 @@ static ko_longopt_t long_options[] = {
 	{ "chain-only",   ko_no_argument,       309 },
 	{ "meth",         ko_no_argument,       310 },
 	{ "hic",          ko_no_argument,       311 },
+	{ "alt",          ko_required_argument, 312 },
+	{ "alt-records",  ko_no_argument,       313 },
+	{ "alt-lift-tol", ko_required_argument, 314 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -348,6 +352,9 @@ static int usage(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -o FILE          output file name [stdout]\n");
 	fprintf(fp, "    -u               don't output unmapped reads\n");
 	fprintf(fp, "    --outn=INT       output up to INT secondary alignments [0]\n");
+	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
+	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
+	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -5               take the alignment with the smallest query position as primary\n");
@@ -377,6 +384,7 @@ int main_map(int argc, char *argv[])
 	mb_idx_t *idx;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
+	const char *alt_fn = 0;
 	ketopt_t o = KETOPT_INIT;
 
 	mb_opt_init(&mo);
@@ -442,6 +450,13 @@ int main_map(int argc, char *argv[])
 			mo.flag |= MB_F_METH;
 		} else if (c == 311) { // --hic
 			mo.flag |= MB_F_PRIMARY5 | MB_F_NO_PAIRING;
+		} else if (c == 312) { // --alt
+			alt_fn = o.arg;
+		} else if (c == 313) { // --alt-records
+			mo.flag |= MB_F_ALT_RECORDS;
+		} else if (c == 314) { // --alt-lift-tol
+			mo.lift_tol = atoi(o.arg);
+			if (mo.lift_tol < 0) mo.lift_tol = 0;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -486,6 +501,7 @@ int main_map(int argc, char *argv[])
 
 	idx = mb_idx_load(argv[o.ind], !!(mo.flag & MB_F_METH));
 	kom_assert(idx, "failed to load the index.");
+	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

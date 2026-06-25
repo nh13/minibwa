@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include <zlib.h>
 #include <stdio.h>
 #include <assert.h>
@@ -230,8 +231,183 @@ l2b_t *l2b_import(const char *fn, uint64_t seed)
 
 void l2b_destroy(l2b_t *l2b)
 {
+	uint64_t i;
+	for (i = 0; i < l2b->n_ctg; ++i)
+		free(l2b->ctg[i].lift);
 	free(l2b->cat_name); free(l2b->cat_comm);
 	free(l2b->pac); free(l2b->ambi); free(l2b->mask); free(l2b->ctg); free(l2b);
+}
+
+/****************************
+ * ALT liftover index       *
+ ****************************/
+
+int l2b_set_alt(l2b_t *l2b, const char *fn)
+{
+	FILE *fp;
+	char *line = 0;
+	size_t line_cap = 0;
+	ssize_t line_len;
+	int n_alt = 0;
+	uint64_t i;
+
+	/* Reset: free any existing lift blocks and clear flags. */
+	for (i = 0; i < l2b->n_ctg; ++i) {
+		free(l2b->ctg[i].lift);
+		l2b->ctg[i].lift = 0;
+		l2b->ctg[i].n_lift = 0;
+		l2b->ctg[i].is_alt = 0;
+	}
+
+	fp = fopen(fn, "r");
+	if (fp == 0) return -1;
+
+	while ((line_len = getline(&line, &line_cap, fp)) > 0) {
+		char *p, *q;
+		char *fields[12];
+		int nf;
+		int64_t alt_tid, pri_tid;
+		uint64_t pri_pos, alt_cursor, pri_cursor;
+		uint32_t flag;
+		uint8_t rev;
+		uint32_t m_lift;
+		l2b_ctg_t *ctg;
+
+		/* Skip SAM header lines. */
+		if (line[0] == '@') continue;
+
+		/* Trim trailing newline. */
+		if (line_len > 0 && line[line_len-1] == '\n') line[--line_len] = '\0';
+		if (line_len > 0 && line[line_len-1] == '\r') line[--line_len] = '\0';
+
+		/* Split into at least 12 tab-delimited fields. */
+		for (nf = 0, p = line; nf < 12; ++nf) {
+			fields[nf] = p;
+			q = strchr(p, '\t');
+			if (q) { *q = '\0'; p = q + 1; }
+			else { ++nf; break; }
+		}
+		if (nf < 6) continue; /* need QNAME, FLAG, RNAME, POS, MAPQ, CIGAR */
+
+		/* Locate ALT contig by QNAME (col 0). */
+		alt_tid = -1;
+		for (i = 0; i < l2b->n_ctg; ++i)
+			if (strcmp(l2b->ctg[i].name, fields[0]) == 0) { alt_tid = i; break; }
+		if (alt_tid < 0) {
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::%s] QNAME '%s' not in index, skipping\n", __func__, fields[0]);
+			continue;
+		}
+
+		/* Unmapped ALT/decoy entries (FLAG 0x4 or RNAME '*') carry no primary
+		 * span; a standard hs38DH .alt ships ~2400 such decoy lines. They were
+		 * never loadable, so skip them silently — warning on each is just noise
+		 * and would flood stderr on every real run. */
+		if ((atol(fields[1]) & 0x4) || strcmp(fields[2], "*") == 0)
+			continue;
+
+		/* Locate primary contig by RNAME (col 2). */
+		pri_tid = -1;
+		for (i = 0; i < l2b->n_ctg; ++i)
+			if (strcmp(l2b->ctg[i].name, fields[2]) == 0) { pri_tid = i; break; }
+		if (pri_tid < 0) {
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::%s] RNAME '%s' not in index, skipping\n", __func__, fields[2]);
+			continue;
+		}
+
+		flag = (uint32_t)atol(fields[1]);
+		rev  = (flag & 0x10) ? 1 : 0;
+
+		/* POS is 1-based; convert to 0-based. */
+		pri_pos = (uint64_t)(atol(fields[3]) - 1);
+
+		ctg = &l2b->ctg[alt_tid];
+		ctg->is_alt = 1;
+		++n_alt;
+
+		/* Walk CIGAR to build lift blocks. */
+		alt_cursor = 0;
+		pri_cursor = pri_pos;
+		m_lift = ctg->n_lift;
+
+		p = fields[5];
+		while (*p) {
+			uint64_t len = 0;
+			int op;
+			while (*p >= '0' && *p <= '9') len = len * 10 + (*p++ - '0');
+			op = *p++;
+			if (op == 'M' || op == '=' || op == 'X') {
+				/* Emit one lift block. */
+				l2b_lift_t blk;
+				blk.alt_st  = alt_cursor;
+				blk.alt_en  = alt_cursor + len;
+				blk.pri_tid = pri_tid;
+				blk.pri_st  = pri_cursor;
+				blk.pri_en  = pri_cursor + len;
+				blk.rev     = rev;
+
+				if (ctg->n_lift >= m_lift) {
+					m_lift = ctg->n_lift + 1;
+					m_lift += m_lift >> 1;
+					ctg->lift = (l2b_lift_t*)realloc(ctg->lift, m_lift * sizeof(l2b_lift_t));
+				}
+				ctg->lift[ctg->n_lift++] = blk;
+
+				alt_cursor += len;
+				pri_cursor += len;
+			} else if (op == 'I' || op == 'S') {
+				/* ALT-only insertion: advance only alt_cursor (hole in primary map). */
+				alt_cursor += len;
+			} else if (op == 'D' || op == 'N') {
+				/* Deletion from ALT: advance only pri_cursor. */
+				pri_cursor += len;
+			}
+			/* H (hard clip) and P (padding) consume nothing in either coordinate. */
+		}
+
+		/* Shrink the lift array to exact size. */
+		if (ctg->n_lift > 0 && ctg->n_lift < m_lift)
+			ctg->lift = (l2b_lift_t*)realloc(ctg->lift, ctg->n_lift * sizeof(l2b_lift_t));
+	}
+
+	free(line);
+	fclose(fp);
+	return n_alt;
+}
+
+int l2b_lift(const l2b_t *l2b, int64_t alt_tid, uint64_t alt_pos,
+             int64_t *pri_tid, uint64_t *pri_pos, uint8_t *rev)
+{
+	const l2b_ctg_t *ctg;
+	int64_t lo, hi, mid;
+
+	if (alt_tid < 0 || alt_tid >= (int64_t)l2b->n_ctg) return 0;
+	ctg = &l2b->ctg[alt_tid];
+	if (!ctg->is_alt || ctg->n_lift == 0) return 0;
+
+	/* Binary search for the block whose [alt_st, alt_en) contains alt_pos. */
+	lo = 0; hi = ctg->n_lift;
+	while (lo < hi) {
+		mid = (lo + hi) / 2;
+		if (ctg->lift[mid].alt_en <= alt_pos) lo = mid + 1;
+		else hi = mid;
+	}
+	if (lo >= (int64_t)ctg->n_lift) return 0;
+	{
+		const l2b_lift_t *blk = &ctg->lift[lo];
+		if (alt_pos < blk->alt_st) return 0; /* in a hole */
+		*pri_tid = blk->pri_tid;
+		*rev      = blk->rev;
+		if (!blk->rev) {
+			/* Forward: primary coord increases with alt coord. */
+			*pri_pos = blk->pri_st + (alt_pos - blk->alt_st);
+		} else {
+			/* Reverse: primary coord decreases as alt coord increases. */
+			*pri_pos = blk->pri_en - 1 - (alt_pos - blk->alt_st);
+		}
+	}
+	return 1;
 }
 
 int l2b_save(const char *fn, const l2b_t *l2b)

@@ -1,6 +1,7 @@
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "mbpriv.h"
 #include "kalloc.h"
 #include "ksort.h"
@@ -166,6 +167,199 @@ static void mb_anchor_dedup(mb_anchor_v *v) // NB: assuming sorted by tpos
 	v->n = j;
 }
 
+/****************************************
+ * ALT-seed -> primary anchor projection *
+ ****************************************/
+
+/* Maximum number of projected primary anchors injected per (pri_tid, folded
+ * strand) bucket.  Segduplicated loci can have hundreds of ALT/paralog copies;
+ * without a cap, near-duplicate paralog projections would blow up mb_lchain_dp's
+ * O(n*max_iter) inner loop on exactly the repeat-heavy reads.  A small cap is
+ * sufficient: we only need ONE surviving primary anchor at the lifted locus to
+ * seed a primary candidate (the rest are near-duplicates the following
+ * mb_anchor_dedup collapses), so capping here never under-recovers. */
+#define MB_PROJ_CAP_PER_LOCUS 4
+
+/* Maximum number of DISTINCT projected primary loci tracked per read.  Sized so
+ * it effectively never fires on real data: a read projecting to more distinct
+ * loci than this is in a massive repeat family and will be MAPQ 0 regardless, so
+ * stopping early is correctness-neutral.  The bound exists only to keep the
+ * per-locus bookkeeping table on the stack.  Both caps are silent in production
+ * but counted and emitted under MB_PROJ_TRACE so truncation is observable. */
+#define MB_PROJ_MAX_LOCI 256
+
+/* Project ALT-contig anchors onto the primary assembly so a segduplicated
+ * primary locus gets a candidate even when max_occ subsampling drops the
+ * primary's OWN seed (DRAGEN's mechanism: use ALT-contig seed matches to obtain
+ * the corresponding primary alignment).
+ *
+ * Called from mb_anchor() AFTER process_batch() has filled v->a[] and BEFORE the
+ * radix_sort + tpos-rebase + mb_anchor_dedup at the tail of mb_anchor().  All
+ * coordinates here are in the CONCATENATED frame (mirroring seed.c:207); the
+ * existing sort/rebase/dedup then handle ordering and exact-duplicate removal of
+ * the injected anchors for free.
+ *
+ * Each injected anchor is written as a NATIVE-equivalent primary anchor (no
+ * provenance bit any chaining code reads): sid = pri_tid<<1 | folded_rev, with
+ * tpos/qpos = last base in the strand-FOLDED concatenated frame and len = seed
+ * length.  It then chains normally under comput_sc() as a genuine primary anchor
+ * -- this is NOT a chainer-merge of an ALT anchor into an ALT chain. */
+static void mb_anchor_project_alt(void *km, const l2b_t *l2b, int32_t qlen, mb_anchor_v *v)
+{
+	int64_t i, n0 = v->n;
+	/* Test-only seam: MB_NO_ALT_PROJECT=1 disables projection so the segdup
+	 * regression test can compare WITH vs WITHOUT projection using a single
+	 * binary.  Shipped behaviour is unconditional (gated only on per-anchor
+	 * is_alt below); production never sets this. */
+	static int8_t disabled = -1;
+	if (disabled < 0) { const char *e = getenv("MB_NO_ALT_PROJECT"); disabled = (e && *e && *e != '0') ? 1 : 0; }
+	if (disabled) return;
+	/* Test-only probe seam (see the MB_PROJ trace below); cached like above. */
+	static int8_t proj_trace = -1;
+	if (proj_trace < 0) { const char *e = getenv("MB_PROJ_TRACE"); proj_trace = (e && *e && *e != '0') ? 1 : 0; }
+	/* Per-locus cap bookkeeping: a tiny rolling table keyed by the projected
+	 * sid (pri_tid<<1|folded_rev) AND the projected forward last base
+	 * (fold_last), so the cap is per distinct projected LOCUS rather than per
+	 * (contig,strand) -- two paralog seeds that lift to different positions on
+	 * the same contig+strand must NOT share a cap slot.  Loci are few per read
+	 * in practice, so a linear scan is fine; this also dedups
+	 * projected-vs-projected at the same locus. */
+	int32_t cap_sid[MB_PROJ_MAX_LOCI];
+	int64_t cap_pos[MB_PROJ_MAX_LOCI];
+	int32_t cap_cnt[MB_PROJ_MAX_LOCI];
+	int32_t n_cap = 0;
+	int64_t n_drop_locuscap = 0, n_drop_tablefull = 0; /* observability (trace only) */
+
+	if (n0 == 0) return;
+
+	for (i = 0; i < n0; ++i) {
+		const mb_anchor_t *q = &v->a[i];
+		int64_t alt_tid = q->sid >> 1;
+		int32_t alt_rev = q->sid & 1;
+		const l2b_ctg_t *alt_ctg;
+		int64_t alt_cst, alt_clast;       /* ALT contig-local forward span [cst, clast] inclusive */
+		int64_t pt_lo, pt_hi;             /* lifted primary tids of the two endpoints */
+		uint64_t pp_lo, pp_hi;            /* lifted primary positions (forward, contig-local) */
+		uint8_t rv_lo, rv_hi;
+		int64_t pri_tid, pri_st, pri_en;  /* primary forward span [st, en] inclusive */
+		uint8_t blk_rev, folded_rev;
+		const l2b_ctg_t *pri_ctg;
+		int64_t qf_s;                     /* query forward start of the seed */
+		int64_t new_qpos, fold_last, new_tpos;
+		int32_t new_sid, j, c;
+		mb_anchor_t *p;
+
+		/* Gate: only ALT contigs with lift blocks project. */
+		if (alt_tid < 0 || alt_tid >= (int64_t)l2b->n_ctg) continue;
+		alt_ctg = &l2b->ctg[alt_tid];
+		if (!alt_ctg->is_alt || alt_ctg->n_lift == 0) continue;
+
+		/* Recover the ALT contig-local FORWARD span from the concatenated tpos
+		 * (inverse of process_batch's q->tpos = off*2 + len*rev + cst + len-1).
+		 * The position component is the FOLDED last base for the seed strand;
+		 * recover that fold first, then unfold per strand to a forward span.
+		 * For a reverse seed the folded last base is the forward FIRST base of
+		 * the span, so cst = len-1-fold_last; for forward it is the last base. */
+		int64_t alt_fold_last = q->tpos - alt_ctg->off * 2 - alt_ctg->len * alt_rev;
+		if (alt_fold_last < 0 || alt_fold_last >= (int64_t)alt_ctg->len) continue;
+		alt_cst = alt_rev ? (int64_t)alt_ctg->len - 1 - alt_fold_last : alt_fold_last - (q->len - 1);
+		alt_clast = alt_cst + q->len - 1; /* inclusive last forward ALT base */
+		if (alt_cst < 0 || alt_clast >= (int64_t)alt_ctg->len) continue;
+
+		/* Lift both inclusive endpoints; a reverse block maps low ALT -> high
+		 * primary, so take min/max over the two lifted outputs.  Require both to
+		 * lift, to the same primary tid and the same block strand (a hole or a
+		 * cross-block seed yields no clean primary anchor -> skip). */
+		if (!l2b_lift(l2b, alt_tid, (uint64_t)alt_cst,   &pt_lo, &pp_lo, &rv_lo)) continue;
+		if (!l2b_lift(l2b, alt_tid, (uint64_t)alt_clast, &pt_hi, &pp_hi, &rv_hi)) continue;
+		if (pt_lo != pt_hi || rv_lo != rv_hi) continue;
+		pri_tid = pt_lo;
+		blk_rev = rv_lo;
+		pri_st = (int64_t)pp_lo < (int64_t)pp_hi ? (int64_t)pp_lo : (int64_t)pp_hi;
+		pri_en = (int64_t)pp_lo > (int64_t)pp_hi ? (int64_t)pp_lo : (int64_t)pp_hi;
+		if (pri_tid < 0 || pri_tid >= (int64_t)l2b->n_ctg) continue;
+		pri_ctg = &l2b->ctg[pri_tid];
+
+		/* Reject length-changing lifts: a seed spanning an indel or two adjacent
+		 * lift blocks maps to a primary span whose length differs from the seed
+		 * length.  Injecting it as a contiguous len-bp anchor would corrupt the
+		 * chain coordinates, so skip it. */
+		if (pri_en - pri_st + 1 != q->len) continue;
+
+		/* Strand fold: the projected primary strand is the .alt block strand
+		 * XOR the seed's strand on the ALT contig (mirrors mb_hit_place's
+		 * blk_rev ^ h->rev). */
+		folded_rev = (uint8_t)(blk_rev ^ alt_rev);
+
+		/* Recover the query FORWARD start of the seed, then re-fold qpos for the
+		 * projected strand (qpos = last base in the folded query frame). */
+		qf_s = alt_rev ? (int64_t)qlen - 1 - q->qpos : q->qpos - (q->len - 1);
+		if (qf_s < 0 || qf_s + q->len > qlen) continue;
+		new_qpos = folded_rev ? (int64_t)qlen - 1 - qf_s : qf_s + q->len - 1;
+
+		/* Forward contig-local LAST base of the primary span.  process_batch
+		 * stores tpos's position component in the FORWARD contig frame for BOTH
+		 * strands (strand lives in sid&1 plus the len*rev half-frame shift; the
+		 * consumer mb_hit_set_coor does ts = tpos+1-len with no reverse-unfold).
+		 * The min/max over the two lifted endpoints already handled the
+		 * reverse-block low-alt -> high-primary inversion, so use pri_en
+		 * unconditionally -- do NOT re-fold for folded_rev. */
+		fold_last = pri_en;
+		if (fold_last < 0 || fold_last >= (int64_t)pri_ctg->len) continue;
+
+		/* Concatenated-frame tpos, mirroring seed.c:207. */
+		new_tpos = pri_ctg->off * 2 + pri_ctg->len * folded_rev + fold_last;
+		new_sid = (int32_t)(pri_tid << 1 | folded_rev);
+
+		/* Test-only probe seam: MB_PROJ_TRACE=1 emits one line per projected
+		 * anchor giving the primary contig, 1-based POS, and projected strand --
+		 * the load-bearing coordinates produced by the reverse-span recovery and
+		 * forward-frame fold (Fix 1+2).  This is observable even when the
+		 * resulting alignment is masked at SAM level by identical-scoring paralog
+		 * collapse (reverse RC repeats), so a fixture can assert the projected
+		 * locus directly.  Production never sets this; it is pure diagnostics. */
+		if (proj_trace) {
+			int64_t pri_pos1 = fold_last - q->len + 2; /* 1-based POS = (ts 0-based)+1 = (fold_last+1-len)+1 */
+			fprintf(stderr, "MB_PROJ\t%s\t%lld\t%c\tlen=%d\n",
+				pri_ctg->name, (long long)pri_pos1, folded_rev ? '-' : '+', q->len);
+		}
+
+		/* Per-locus cap + projected-vs-projected dedup at the same projected
+		 * locus (sid + forward last base).  (Projected-vs-native exact
+		 * duplicates are removed by the mb_anchor_dedup that runs right after
+		 * this; here we only bound volume and squash redundant paralog
+		 * projections to the same coordinate.) */
+		c = -1;
+		for (j = 0; j < n_cap; ++j)
+			if (cap_sid[j] == new_sid && cap_pos[j] == fold_last) { c = j; break; }
+		if (c < 0) {
+			if (n_cap < (int32_t)(sizeof(cap_sid) / sizeof(cap_sid[0]))) {
+				c = n_cap++;
+				cap_sid[c] = new_sid;
+				cap_pos[c] = fold_last;
+				cap_cnt[c] = 0;
+			} else { ++n_drop_tablefull; continue; } /* table full: stop projecting new loci */
+		}
+		if (cap_cnt[c] >= MB_PROJ_CAP_PER_LOCUS) { ++n_drop_locuscap; continue; }
+		++cap_cnt[c];
+
+		/* Inject the native-equivalent primary anchor (flag/flt = 0 via memset). */
+		Kgrow(km, mb_anchor_t, v->a, v->n, v->m);
+		p = &v->a[v->n++];
+		memset(p, 0, sizeof(*p));
+		p->sid  = new_sid;
+		p->len  = q->len;
+		p->qpos = (int32_t)new_qpos;
+		p->tpos = new_tpos;
+	}
+	/* Make cap-driven truncation observable (default-off diagnostic seam): in
+	 * production both caps are correctness-neutral, but a non-zero drop count on
+	 * a repeat-heavy read is worth seeing when investigating recovery. */
+	if (proj_trace && (n_drop_locuscap || n_drop_tablefull))
+		fprintf(stderr, "MB_PROJ_CAP\tdropped_locuscap=%lld\tdropped_tablefull=%lld\tn_loci=%d\n",
+			(long long)n_drop_locuscap, (long long)n_drop_tablefull, n_cap);
+}
+
 /************************
  * Get contig positions *
  ************************/
@@ -327,6 +521,12 @@ double mb_anchor(void *km, const mb_idx_t *idx, mb_sai_v *u, int32_t min_len, in
 		for (i = 0, t1 = 0; i < v->n; ++i) t1 += v->a[i].len;
 		seed_ratio = (double)t1 / t0;
 	}
+
+	/* ALT-seed -> primary anchor projection (segdup recovery).  Inject in the
+	 * concatenated frame so the radix_sort + tpos-rebase + mb_anchor_dedup below
+	 * order and dedup the injected anchors for free.  No-op unless a seed landed
+	 * on an ALT contig (so non-ALT references are byte-identical). */
+	mb_anchor_project_alt(km, idx->l2b, qlen, v);
 
 	radix_sort_mb_anchor(v->a, v->a + v->n);
 	for (i = 0; i < v->n; ++i) { // adjust mb_anchor_t::tpos

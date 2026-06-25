@@ -8,9 +8,22 @@
 
 typedef enum { L2B_METH_NONE=0, L2B_METH_C2T, L2B_METH_G2A } l2b_meth_t;
 
+/* One aligned block from the .alt CIGAR (one M/=/X run).
+ * Maps ALT positions [alt_st, alt_en) to primary positions [pri_st, pri_st+len)
+ * (forward) or [pri_en-len, pri_en) traversed in reverse (rev). */
+typedef struct {
+	uint64_t alt_st, alt_en;   /* half-open interval on ALT contig */
+	int64_t  pri_tid;           /* primary contig index */
+	uint64_t pri_st, pri_en;   /* half-open interval on primary contig */
+	uint8_t  rev;               /* 1 = ALT is RC-aligned to primary */
+} l2b_lift_t;
+
 typedef struct {
 	char *name, *comm;
 	uint64_t len, off;
+	uint8_t  is_alt;            /* 1 if this contig appears as QNAME in the .alt file */
+	uint32_t n_lift;            /* number of lift blocks */
+	l2b_lift_t *lift;           /* sorted by alt_st; NULL when n_lift==0 */
 } l2b_ctg_t;
 
 typedef struct {
@@ -43,6 +56,17 @@ int64_t l2b_intv2cid_meth(const l2b_t *l2b, uint64_t st, uint64_t en, l2b_meth_t
 int64_t l2b_getseq(const l2b_t *l2b, int64_t tid, int64_t st, int64_t en, uint8_t *seq);
 int64_t l2b_getambi(const l2b_t *l2b, int64_t tid, int64_t st, int64_t en, int32_t *n_ambi);
 void l2b_meth_convert(l2b_meth_t mt, int64_t len, uint8_t *seq);
+
+/* Load an ALT file (SAM), set l2b_ctg_t.is_alt and populate lift[] blocks for each
+ * ALT contig.  Safe to call multiple times (re-entrant: frees old lift[] first).
+ * Returns the number of ALT contigs found, or -1 on file error. */
+int l2b_set_alt(l2b_t *l2b, const char *fn);
+
+/* Map (alt_tid, alt_pos) to (pri_tid, pri_pos).  alt_pos is 0-based.
+ * Returns 1 if liftable (fills *pri_tid, *pri_pos, *rev),
+ * 0 if in a hole (ALT-only insertion; pri_tid, pri_pos, rev left unchanged). */
+int l2b_lift(const l2b_t *l2b, int64_t alt_tid, uint64_t alt_pos,
+             int64_t *pri_tid, uint64_t *pri_pos, uint8_t *rev);
 
 l2b_t *l2b_import(const char *fn, uint64_t seed);
 int l2b_save(const char *fn, const l2b_t *l2b);

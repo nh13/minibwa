@@ -16,6 +16,27 @@ static inline int mb_insert_dir(const mb_hit_t *h0, const mb_hit_t *h1, int64_t 
 	return ((int32_t)h0->rev << 1 | (int32_t)h1->rev) ^ (p0 < p1? 0 : 3);
 }
 
+/* ALT liftover-group (Hook C): true iff two hits are DISTINCT lifted groups --
+ * both liftable, but sharing NO lifted sub-interval within lift_tol (different
+ * primary contigs, opposite lifted strands, or all sub-placement pairs > lift_tol
+ * apart -- i.e. real paralogs).  Used to STOP the chimeric demotion from
+ * collapsing two distinct primary loci that merely overlap in query span.  A
+ * breakpoint-spanning ALT hit that shares a sub-interval with its primary twin is
+ * NOT distinct (same locus).  An UNLIFTABLE hit is NOT a protected distinct group:
+ * it returns 0 here so it falls through to normal demotion (preserving baseline
+ * behavior and not shielding spurious hits). */
+static inline int mb_distinct_lifted_group(const l2b_t *l2b, const mb_hit_t *a, const mb_hit_t *b, int lift_tol)
+{
+	mb_place_t pa = mb_hit_place(l2b, a), pb = mb_hit_place(l2b, b);
+	if (!pa.liftable || !pb.liftable) return 0;          /* unliftable -> NOT a protected distinct group */
+	/* Distinct (protected) iff they do NOT co-locate: no shared lifted
+	 * sub-interval (different pri_tid, opposite strand, or all sub-placements
+	 * > lift_tol apart).  A breakpoint-spanning ALT hit that shares a
+	 * sub-interval with its primary twin is NOT distinct (same locus -> may be
+	 * demoted), while two genuine paralog loci stay protected. */
+	return !mb_places_colocate(&pa, &pb, lift_tol);
+}
+
 static inline double mb_pair_score(const mb_hit_t *h0, const mb_hit_t *h1, const mb_pestat_t pes[4], int32_t match_sc)
 {
 	const double MB_SQRT1_2 = 0.707106781186547524401;
@@ -147,9 +168,20 @@ static void mb_pair_hits(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	pa = Kcalloc(km, mb128_t, n_hit[0] + n_hit[1]);
 	for (r = n_pa = 0; r < 2; ++r) {
 		for (i = 0; i < n_hit[r]; ++i) {
-			mb128_t *p = &pa[n_pa++];
+			mb128_t *p;
 			mb_hit_t *h = &hit[r][i];
 			h->proper_pair = 0;
+			/* Hook B (ALT liftover-group): a non-representative member of a lifted
+			 * group (an ALT twin folded under its primary by mb_reconcile_alt:
+			 * is_alt && parent != id) must NOT enter pair enumeration.  Otherwise
+			 * the twin pair (R1@alt, R2@alt) forms a near-equal SECOND-best pair
+			 * that depresses paux.sub_sc => mapq_pe collapses to ~0 even though the
+			 * twin is the SAME locus on primary vs ALT.  Excluding non-reps makes
+			 * paux.sub_sc measure the gap to the second-best GROUP-pair.  parent is
+			 * set by the SE-path reconcile (survives on no-rescue reads) and, on
+			 * rescued reads, by Hook A before the second mb_pair_hits call. */
+			if (h->is_alt && h->parent != h->id) continue;
+			p = &pa[n_pa++];
 			p->x = l2b->ctg[h->tid].off + (h->rev? h->te : h->ts);
 			p->y = (uint64_t)i << 2 | (uint64_t)h->rev << 1 | r;
 		}
@@ -359,6 +391,12 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 				mb_matesw_align(km, opt, len, seq[is_rev], te2 - ts2, &ref[ts2 - ts], &ht, min_sc, mt, ez);
 			if (ht.p) { // a good hit found
 				ht.tid = h0->tid;
+				/* Stamp is_alt from the contig: mb_matesw_align memset(h,0) cleared
+				 * it, and a mate rescued onto an ALT contig must be visible to the
+				 * liftover-group reconciliation (Hook A), else grouping is blind to
+				 * exactly the reads mate rescue exists to recover.  Mirrors the stamp
+				 * mb_gen_hit applies to seeded hits. */
+				ht.is_alt = l2b->ctg[ht.tid].is_alt;
 				ht.ts += ts2, ht.te += ts2;
 				ht.rev = is_rev;
 				if (is_rev) {
@@ -367,6 +405,23 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 					ht.qe = len - qt;
 				}
 				//fprintf(stderr, "X\t%s\tsc0=%d\tnew_sc=%d\tnew_ts=%ld\tn_cigar=%d\tcigar[0]=%d\n", l2b->ctg[ht.tid].name, h0->p->dp_max, ht.p->dp_max, (long)ht.ts, ht.p->n_cigar, ht.p->cigar[0]>>4);
+				/* Skip a rescued hit that exactly duplicates one the seeder already
+				 * found (same contig/strand/coords).  Suppressing the ALT-twin pair
+				 * (Hook B) makes the pair look unpaired, so mate rescue re-runs and
+				 * re-discovers an already-present ALT hit -- without this guard that
+				 * yields two identical secondary SAM records.  An identical-coordinate
+				 * duplicate carries no new information, so dropping it is safe for the
+				 * non-ALT path too. */
+				{
+					int32_t e; int dup = 0;
+					for (e = 0; e < h1->n; ++e) {
+						const mb_hit_t *he = &h1->a[e];
+						if (he->tid == ht.tid && he->rev == ht.rev &&
+						    he->ts == ht.ts && he->te == ht.te &&
+						    he->qs == ht.qs && he->qe == ht.qe) { dup = 1; break; }
+					}
+					if (dup) { if (ht.p) free(ht.p); kfree(km, ref); continue; }
+				}
 				if (h1->n == h1->m) kom_grow(mb_hit_t, h1->a, h1->n, h1->m);
 				h1->a[h1->n++] = ht;
 				ret = &h1->a[h1->n - 1];
@@ -482,6 +537,15 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 				}
 				mb_hit_sort(km, &n_hit[r], hit[r]);
 				mb_set_parent(km, opt->mask_level, opt->mask_len, n_hit[r], hit[r], sub_diff, 0);
+				/* Hook A (ALT liftover-group): mate rescue zeroed the suboptimal
+				 * fields (:481) and mb_set_parent re-derived `parent` with no group
+				 * knowledge, wiping the SE-path reconciliation for THIS read.  Re-
+				 * impose liftover groups before mb_set_mapq consumes the group-scoped
+				 * subsc/dp_max2/n_sub, and before the second mb_pair_hits so Hook B
+				 * sees the correct parent.  Only runs on rescued reads (this block is
+				 * rescue-conditional); the no-rescue majority keeps the SE reconcile. */
+				if (mb_any_alt(n_hit[r], hit[r]))
+					mb_reconcile_alt(km, l2b, n_hit[r], hit[r], sub_diff, opt->lift_tol);
 				mb_set_mapq(km, qlen[r], n_hit[r], hit[r], opt->min_chain_score, opt->a, mb_is_sr_mode(opt, qlen[r]), opt->max_sr_len);
 			}
 			mb_pair_hits(km, opt, l2b, n_hit, hit, pes, &paux); // pair again if new hits rescued
@@ -505,12 +569,20 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	for (r = 0; r < 2; ++r) // clear 0x2 as these will be re-evaluated and set in the following
 		for (i = 0; i < n_hit[r]; ++i)
 			hit[r][i].proper_pair = 0;
+	mb_hit_t *h[2];
+	h[0] = &hit[0][paux.i[0]];
+	h[1] = &hit[1][paux.i[1]];
+	/* ALT liftover-group: Hook B excludes non-representative ALT group members
+	 * (is_alt && parent != id) from pair enumeration, so a chosen pair endpoint
+	 * that is ALT must be its group's representative (parent == id).  Guards the
+	 * re-rooting at :563-569 from promoting an ALT subordinate to primary and
+	 * emitting the wrong sam_pri.  (Non-ALT subordinates may still legitimately be
+	 * pair endpoints -- the re-rooting block handles them as before.) */
+	assert(!h[0]->is_alt || h[0]->id == h[0]->parent);
+	assert(!h[1]->is_alt || h[1]->id == h[1]->parent);
 	if (paux.score >= score_se - opt->pen_unpair * opt->a) { // choose the paired hits
 		int32_t mapq_pe, score2 = paux.sub_sc, diff;
 		double identity;
-		mb_hit_t *h[2];
-		h[0] = &hit[0][paux.i[0]];
-		h[1] = &hit[1][paux.i[1]];
 		assert(n_hit[0] > 0 && n_hit[1] > 0);
 		identity = (double)(h[0]->mlen + h[1]->mlen) / (h[0]->blen + h[1]->blen);
 		if ((h[0]->id != h[0]->parent || h[1]->id != h[1]->parent) && score2 < score_se - opt->pen_unpair * opt->a)
@@ -536,11 +608,26 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 						hit[r][i].parent = h[r]->id;
 				p->mapq = 0;
 			}
+			/* Hook C gate (ALT liftover-group): only consult lifted placement when
+			 * this mate actually has ALT hits, so a reference with no .alt loaded is
+			 * byte-identical (mb_any_alt is false => no behavior change). */
+			int r_any_alt = mb_any_alt(n_hit[r], hit[r]);
 			for (i = 0; i < n_hit[r]; ++i) { // handle other chimeric hits
 				const mb_hit_t *q = h[r];
 				mb_hit_t *p = &hit[r][i];
 				if (q != p && p->id == p->parent) { // p is a chimeric hit that is not h[r]
 					int32_t j, ol = p->qe <= q->qs || p->qs >= q->qe? 0 : (p->qe < q->qe? p->qe : q->qe) - (p->qs > q->qs? p->qs : q->qs);
+					/* Hook C (ALT liftover-group): the demotion below collapses `p`
+					 * under the pair-hit `q` by QUERY overlap alone.  When `p` and `q`
+					 * are co-located copies (same lifted group) the demotion is
+					 * correct -- the ALT twin SHOULD become secondary.  But when they
+					 * are DIFFERENT lifted groups (distinct primary loci / paralogs)
+					 * the demotion would wrongly merge two genuine competing loci and
+					 * inflate MAPQ, undoing the Task-4 paralog guard for PE.  Skip the
+					 * demotion across distinct groups.  Gated on r_any_alt so the
+					 * no-.alt baseline is unchanged. */
+					if (r_any_alt && mb_distinct_lifted_group(l2b, p, q, opt->lift_tol))
+						continue;
 					if (ol > opt->mask_level * (p->qe - p->qs)) { // if p overlaps with h[r] a lot, make it a secondary hit
 						for (j = 0; j < n_hit[r]; ++j) // FIXME: quadratic time complexity, but almost never an issue on real data
 							if (hit[r][j].parent == p->id)

@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "l2bit.h"
+
 #define MB_VERSION "0.7-r421"
 
 #define MB_F_PAF              (0x1LL)       // output in the PAF format
@@ -23,6 +25,7 @@
 #define MB_F_PRIMARY5         (0x8000LL)    // for Hi-C
 #define MB_F_NO_PAIRING       (0x10000LL)   // don't pair reads
 #define MB_F_METH             (0x20000LL)   // methylation mode
+#define MB_F_ALT_RECORDS      (0x40000LL)   // emit ALT-contig hits with full SEQ
 
 #define MB_CIGAR_MATCH      0
 #define MB_CIGAR_INS        1
@@ -84,6 +87,7 @@ typedef struct {
 	int64_t max_mb_size;
 	int64_t max_sw_mat;
 	int64_t cap_kalloc;
+	int32_t lift_tol;  // ALT liftover-group co-location tolerance in bp (default MB_LIFT_TOL)
 } mb_opt_t;
 
 struct mb_idx_s;
@@ -113,9 +117,73 @@ typedef struct {
 	int32_t mlen, blen;
 	int32_t mapq;
 	uint32_t hash;
-	uint32_t rev:1, proper_pair:1, sam_pri:1, flt:1, inv:1, split:2, split_inv:1, rescued:1, frac_high:8, seed_ratio:8, dummy:7;
+	uint32_t rev:1, proper_pair:1, sam_pri:1, flt:1, inv:1, split:2, split_inv:1, rescued:1, frac_high:8, seed_ratio:8, is_alt:1, dummy:6;
 	mb_extra_t *p;
 } mb_hit_t;
+
+/* Co-location tolerance (bp) on the lifted footprint start used to group hits
+ * by primary locus.  Two hits are the same locus iff they share pri_tid, rev,
+ * and their lifted_st differ by no more than the tolerance.  This is the
+ * COMPILE-TIME DEFAULT; the effective value is opt->lift_tol (runtime-tunable
+ * via --alt-lift-tol), threaded into the survival guard, reconciliation, and the
+ * PE demotion guard.  Raise it for .alt files whose ALT-to-primary CIGARs carry
+ * larger indels (lifting a read start across an indel can drift lifted_st by up
+ * to the indel size); the query-span-overlap requirement guards against merging
+ * genuine paralogs even at a looser tolerance. */
+#define MB_LIFT_TOL 10
+
+/* Maximum number of per-block lifted sub-placements retained in mb_place_t.
+ * A read footprint (~150 bp pre/post DP) overlaps at most this many .alt lift
+ * blocks in practice; if MORE blocks overlap (a pathologically fragmented .alt
+ * CIGAR over the footprint) the FIRST MB_MAX_SUBPL are kept and the rest spill
+ * (documented in mb_hit_place).  Spilling only ever DROPS candidate co-location
+ * intervals -- it can never invent a spurious match -- so it is conservatively
+ * safe for paralog isolation. */
+#define MB_MAX_SUBPL 8
+
+/* One lifted sub-placement: where a single overlapping .alt lift block maps the
+ * footprint onto primary coordinates.
+ *   st       representative (min) primary coordinate of this block's lifted span
+ *   pri_tid  primary contig this block lands on
+ *   rev      strand of this block's footprint on primary (.alt block strand XOR h->rev) */
+typedef struct {
+	int64_t st;
+	int64_t pri_tid;
+	uint8_t rev;
+} mb_subpl_t;
+
+/* The lifted PLACEMENT of one hit: the primary footprint it occupies over its
+ * liftable portion.  Computed by mb_hit_place().
+ *
+ * MULTI-INTERVAL placement (SV-breakpoint-aware grouping): instead of collapsing
+ * every overlapping .alt lift block into a single [lifted_st, lifted_en], the
+ * placement records ONE sub-placement per overlapping block in subpl[].  A
+ * breakpoint-spanning ALT hit whose footprint straddles an SV-scale indel then
+ * exposes BOTH the near-breakpoint primary position AND the far one as separate
+ * sub-placements, so it can still co-locate with its primary twin via the
+ * matching sub-interval (mb_places_colocate) instead of being dragged thousands
+ * of bp away by a min/max collapse.  Co-location requires a SHARED sub-interval,
+ * so two distinct primary loci that happen to land in one inflated span are NOT
+ * merged (paralog safety).
+ *
+ *   pri_tid    REPRESENTATIVE primary contig (== subpl[0].pri_tid; == h->tid for
+ *              non-ALT hits).  Kept for back-compat readers.
+ *   lifted_st  REPRESENTATIVE primary coordinate (== subpl[0].st).  Back-compat
+ *              grouping key for any reader not yet on the multi-interval API.
+ *   lifted_en  max primary coordinate over all sub-placements (cosmetic: nothing
+ *              reads it for grouping decisions).
+ *   rev        REPRESENTATIVE strand (== subpl[0].rev; .alt block strand XOR h->rev).
+ *   liftable   1 iff n_subpl >= 1 (at least one block of the footprint lifts);
+ *              0 iff the ENTIRE footprint falls in holes (ALT-specific -> own group).
+ *   n_subpl    number of valid sub-placements (1..MB_MAX_SUBPL; 0 when !liftable).
+ *   subpl      the per-block lifted sub-placements (first n_subpl entries valid). */
+typedef struct {
+	int64_t pri_tid;
+	int64_t lifted_st, lifted_en;
+	uint8_t rev, liftable;
+	int n_subpl;
+	mb_subpl_t subpl[MB_MAX_SUBPL];
+} mb_place_t;
 
 struct mb_tbuf_s;
 typedef struct mb_tbuf_s mb_tbuf_t;
@@ -127,8 +195,25 @@ extern "C" {
 mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth);
 mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload);
 void mb_idx_destroy(mb_idx_t *idx);
+void mb_idx_set_alt(mb_idx_t *idx, const char *fn);
 const char *mb_idx_ctg_name(const mb_idx_t *idx, int32_t tid);
 int64_t mb_idx_ctg_len(const mb_idx_t *idx, int32_t tid);
+
+/**
+ * Compute the lifted PLACEMENT (primary footprint) of one hit.
+ *
+ * For a non-ALT hit this is the identity placement on its own contig.  For an
+ * ALT hit it lifts the aligned footprint (the chain interval [ts,te) pre-DP, or
+ * the exact CIGAR span post-DP) through the .alt span-lift to primary
+ * coordinates, taking the min/max over the LIFTED (primary) outputs so a reverse
+ * .alt block folds correctly and a footprint end sitting in a hole walks inward
+ * to the first/last liftable base.  See mb_place_t.
+ *
+ * @param l2b  the span-lift index (must have .alt loaded for ALT hits)
+ * @param h    the hit; h->p may be NULL (pre-DP, coarse) or non-NULL (post-DP, exact)
+ * @return     the placement; liftable==0 if the whole footprint is in holes
+ */
+mb_place_t mb_hit_place(const l2b_t *l2b, const mb_hit_t *h);
 
 void mb_opt_init(mb_opt_t *opt);
 int mb_opt_preset(mb_opt_t *opt, const char *preset);

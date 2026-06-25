@@ -215,11 +215,14 @@ static void *worker_pipeline(void *shared, int step, void *in)
 				}
 				tot_len += t->l_seq;
 				if (s->n_hit[i] > 0) { // the query has at least one hit
-					int32_t n_sec = 0;
+					int32_t n_sec = 0, alt_rec;
 					for (j = 0; j < s->n_hit[i]; ++j) {
 						const mb_hit_t *h = &s->hit[i][j];
-						if (h->parent == h->id || n_sec < opt->out_n) {
-							if (h->parent != h->id) {
+						/* --alt-records emits every ALT hit, so it also bypasses the
+						 * secondary score-ratio filter upstream added below. */
+						alt_rec = (opt->flag & MB_F_ALT_RECORDS) && h->is_alt;
+						if (h->parent == h->id || n_sec < opt->out_n || alt_rec) {
+							if (h->parent != h->id && !alt_rec) {
 								const mb_hit_t *p = &s->hit[i][h->parent];
 								if (p->p && h->p) {
 									if (h->p->dp_max < (double)opt->out_s * p->p->dp_max) continue;
@@ -346,6 +349,9 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
+	{ "alt",          ko_required_argument, 316 },
+	{ "alt-records",  ko_no_argument,       317 },
+	{ "alt-lift-tol", ko_required_argument, 318 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -397,6 +403,9 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    --outn=NUM       output up to {NUM,-N} secondary alignments [0]\n");
 	fprintf(fp, "    --outs=FLOAT     output a secondary hit if score at least FLOAT*bestScore [%g]\n", opt->out_s);
 	fprintf(fp, "    --xa=NUM         if <=NUM hits with score >%g%% of the best hit, output them to XA [%d]\n", opt->out_s*100.0, opt->xa_max);
+	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
+	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
+	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -H STR           if STR starts with @, insert to header; or insert lines in file STR []\n");
@@ -439,6 +448,7 @@ int main_map(int argc, char *argv[])
 	mb_idx_t *idx;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
+	const char *alt_fn = 0;
 	ketopt_t o = KETOPT_INIT;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 
@@ -512,6 +522,13 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
+		} else if (c == 316) { // --alt
+			alt_fn = o.arg;
+		} else if (c == 317) { // --alt-records
+			mo.flag |= MB_F_ALT_RECORDS;
+		} else if (c == 318) { // --alt-lift-tol
+			mo.lift_tol = atoi(o.arg);
+			if (mo.lift_tol < 0) mo.lift_tol = 0;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -558,6 +575,7 @@ int main_map(int argc, char *argv[])
 	is_meth = !!(mo.flag & MB_F_METH);
 	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
 	kom_assert(idx, "failed to load the index.");
+	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

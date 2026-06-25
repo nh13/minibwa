@@ -433,7 +433,7 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 }
 
 static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], mb_hit_t *hit[2], const mb_pestat_t pes[4], const mb_pairaux_t *paux0,
-	int32_t qlen[2], char *const qseq[2], int32_t is_meth)
+	int32_t qlen[2], char *const qseq[2], int32_t is_meth, int32_t rescue_tie[2])
 {
 	int32_t i, r, n_add, n_res, max[2], max2[2], skip[2], min_sc[2];
 	mb_hit_v ha[2];
@@ -507,6 +507,11 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	kfree(km, ez.cigar);
 	kfree(km, qs[0][0]);
 	kfree(km, a);
+	/* Surface the rescue-tie signal: skip[r] is set iff, while using read r's copies
+	 * as rescue anchors, two equal-scoring rescued pairs were found -- i.e. the mate
+	 * fits EQUALLY beside >=2 of r's copies.  mb_pair uses this to recognise a
+	 * coin-flip pair (see the MAPQ damp below). */
+	rescue_tie[0] = skip[0], rescue_tie[1] = skip[1];
 	n_add = (ha[0].n - n_hit[0]) + (ha[1].n - n_hit[1]);
 	for (r = 0; r < 2; ++r)
 		n_hit[r] = ha[r].n, hit[r] = ha[r].a;
@@ -520,6 +525,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	mb_pairaux_t paux;
 	int32_t seed_ratio[2], min_seed_ratio;
 	int32_t pri_idx[2] = {-1, -1}; /* PE-pair-chosen primary endpoint per read; -1 => fall back to per-read order */
+	int32_t rescue_tie[2] = {0, 0}; /* per-read: set when mate rescue found >=2 equal pairs from this read's anchors */
 
 	if (n_hit[0] == 0 && n_hit[1] == 0) return;
 	seed_ratio[0] = n_hit[0] > 0? hit[0][0].seed_ratio : 255;
@@ -529,7 +535,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	do_matesw = paux.n_pp > 0 && paux.score == paux.sub_sc? 0 : 1; // skip mate rescue if we see two equally best pairs
 	if (do_matesw && opt->max_rescue > 0) {
 		int32_t sub_diff = opt->a + opt->b > opt->q + opt->e? opt->a + opt->b : opt->q + opt->e;
-		if (mb_matesw(km, opt, l2b, n_hit, hit, pes, &paux, qlen, qseq, is_meth) > 0) {
+		if (mb_matesw(km, opt, l2b, n_hit, hit, pes, &paux, qlen, qseq, is_meth, rescue_tie) > 0) {
 			for (r = 0; r < 2; ++r) {
 				for (i = 0; i < n_hit[r]; ++i) {
 					mb_hit_t *h = &hit[r][i];
@@ -607,6 +613,31 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 		if (mapq_pe < 0) mapq_pe = 0;
 		mapq_pe = (int)(mapq_pe * (1. - .5 * (h[0]->frac_high / 255. + h[1]->frac_high / 255.)) + .499);
 		if (min_seed_ratio < 50) mapq_pe *= (double)min_seed_ratio * min_seed_ratio / 2500.0;
+		/* Coin-flip damp.  A proper pair is a coin-flip -- arbitrary among several
+		 * equivalent placements -- when ALL of:
+		 *   (a) one endpoint was placed ONLY by mate rescue (the other anchored it),
+		 *   (b) mate rescue found >=2 equal-scoring pairs from the anchor's copies
+		 *       (rescue_tie: the mate fits >=2 of them equally), and
+		 *   (c) the anchor end really has >=2 co-optimal representatives (its own DP
+		 *       second-best ties its best, within one match score).
+		 * The surviving single pair is then an arbitrary pick of one tied copy, so the
+		 * high pair-based mapq overstates confidence -- damp it to ~0 (bwa-mem stays
+		 * cautious here too).  Conditions (a)+(b) keep this off genuine recoveries,
+		 * where the mate fits exactly one copy.  Reuses already-computed fields.  This
+		 * only fires when ALT lifting has re-exposed the second co-optimal copy as a
+		 * representative, so it is a no-op without a .alt (byte-identical to baseline). */
+		{	int rr;
+			for (rr = 0; rr < 2; ++rr) {
+				int32_t j, n_coopt = 0;
+				if (!h[!rr]->rescued || h[rr]->rescued || !rescue_tie[rr]) continue;
+				for (j = 0; j < n_hit[rr]; ++j) {
+					const mb_hit_t *hj = &hit[rr][j];
+					if (hj->id == hj->parent && hj->p && hj->p->dp_max >= dp_max_se[rr] - opt->a)
+						++n_coopt;
+				}
+				if (n_coopt >= 2) { mapq_pe = 0; break; }
+			}
+		}
 		if (mapq_pe > 60) mapq_pe = 60;
 		if (mapq_pe <= 0 && paux.score > score2) mapq_pe = 1;
 		for (r = 0; r < 2; ++r) {

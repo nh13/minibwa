@@ -480,7 +480,7 @@ void mb_sync_hits(void *km, int n_regs, mb_hit_t *regs)
 		else r->parent = MB_PARENT_UNSET;
 	}
 	kfree(km, tmp);
-	mb_set_sam_pri(n_regs, regs, 0); // this flag will be overwritten later anyway
+	mb_set_sam_pri(n_regs, regs, 0, -1); // this flag will be overwritten later anyway
 }
 
 /**********************************
@@ -559,7 +559,18 @@ add_primary:
 	kfree(km, w);
 }
 
-int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
+/* Mark the SAM primary among the group representatives (parent==id).
+ *
+ * `pref` is the PE-pair-chosen endpoint (mb_pair sets it to paux.i[r] when a
+ * proper pair was applied; -1 otherwise / on the SE path).  When present and it
+ * survived as a representative, it IS the read's primary placement: the pair
+ * score (DP + insert-size consistency) disambiguated near-equal paralog copies
+ * that this per-read pass cannot (the reps are sorted by DP score then hash, so
+ * among equal-scoring subtelomeric/segdup paralogs the first-by-index rep is
+ * effectively arbitrary -- and was emitting a different copy than the mate-
+ * consistent one the pairing chose).  Otherwise fall back to the 5'-most
+ * (is_primary5) or the first representative. */
+int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5, int32_t pref)
 {
 	int32_t i, new_pri, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
 	if (n <= 0) return -1;
@@ -571,7 +582,8 @@ int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 			min_i = i, min_qs = r[i].qs;
 	}
 	assert(n_pri > 0);
-	new_pri = is_primary5? min_i : first_i;
+	if (pref >= 0 && pref < n && r[pref].id == r[pref].parent) new_pri = pref;
+	else new_pri = is_primary5? min_i : first_i;
 	r[new_pri].sam_pri = 1;
 	return new_pri;
 }
@@ -1122,7 +1134,7 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 		 * SAM primary/secondary reflect the new grouping; gated so non-ALT reads pay
 		 * nothing. */
 		if (mb_any_alt(n_hit, hit)) mb_reconcile_alt(b->km, idx->l2b, n_hit, hit, sub_diff, opt->lift_tol);
-		mb_set_sam_pri(n_hit, hit, !!(opt->flag & MB_F_PRIMARY5));
+		mb_set_sam_pri(n_hit, hit, !!(opt->flag & MB_F_PRIMARY5), -1);
 	}
 	for (i = 0; i < n_hit; ++i) {
 		hit[i].frac_high = (int32_t)(255. * hi_cov / qlen);

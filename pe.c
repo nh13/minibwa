@@ -519,6 +519,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	int32_t r, i, dp_max_se[2], score_se, dp_max_se2[2], score_se2, do_matesw, is_meth = !!(opt->flag & MB_F_METH), reset_sam_pri = 1;
 	mb_pairaux_t paux;
 	int32_t seed_ratio[2], min_seed_ratio;
+	int32_t pri_idx[2] = {-1, -1}; /* PE-pair-chosen primary endpoint per read; -1 => fall back to per-read order */
 
 	if (n_hit[0] == 0 && n_hit[1] == 0) return;
 	seed_ratio[0] = n_hit[0] > 0? hit[0][0].seed_ratio : 255;
@@ -584,6 +585,18 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 		int32_t mapq_pe, score2 = paux.sub_sc, diff;
 		double identity;
 		assert(n_hit[0] > 0 && n_hit[1] > 0);
+		/* The pairing chose these endpoints (DP + insert-size consistency); the
+		 * re-rooting below makes each its group representative.  Record them so
+		 * mb_set_sam_pri emits the pair-chosen copy as the SAM primary instead of
+		 * the first-by-DP/hash representative -- the two differ for near-equal
+		 * paralog copies (subtelomeric/segdup), where the per-read order would
+		 * otherwise emit a copy inconsistent with the mate.  Opt-in
+		 * (--pe-pair-primary): off by default so plain `minibwa mem` stays
+		 * byte-identical to baseline. */
+		if (opt->flag & MB_F_PE_PAIR_PRI) {
+			pri_idx[0] = paux.i[0];
+			pri_idx[1] = paux.i[1];
+		}
 		identity = (double)(h[0]->mlen + h[1]->mlen) / (h[0]->blen + h[1]->blen);
 		if ((h[0]->id != h[0]->parent || h[1]->id != h[1]->parent) && score2 < score_se - opt->pen_unpair * opt->a)
 			score2 = score_se - opt->pen_unpair * opt->a;
@@ -646,8 +659,10 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 		}
 		if (opt->flag & MB_F_PRIMARY5) {
 			int32_t pri[2];
-			pri[0] = mb_set_sam_pri(n_hit[0], hit[0], 1);
-			pri[1] = mb_set_sam_pri(n_hit[1], hit[1], 1);
+			/* -1: this block asks what the 5-prime rule alone would pick, so the
+			 * pair-chosen endpoint must not override it or the test below is vacuous. */
+			pri[0] = mb_set_sam_pri(n_hit[0], hit[0], 1, -1);
+			pri[1] = mb_set_sam_pri(n_hit[1], hit[1], 1, -1);
 			if (&hit[0][pri[0]] != h[0] || &hit[1][pri[1]] != h[1]) // if sam_pri is changed, clear flag 0x2
 				for (r = 0; r < 2; ++r)
 					for (i = 0; i < n_hit[r]; ++i)
@@ -663,7 +678,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 	}
 end_pairing:
 	if (reset_sam_pri) {
-		mb_set_sam_pri(n_hit[0], hit[0], !!(opt->flag & MB_F_PRIMARY5));
-		mb_set_sam_pri(n_hit[1], hit[1], !!(opt->flag & MB_F_PRIMARY5));
+		mb_set_sam_pri(n_hit[0], hit[0], !!(opt->flag & MB_F_PRIMARY5), pri_idx[0]);
+		mb_set_sam_pri(n_hit[1], hit[1], !!(opt->flag & MB_F_PRIMARY5), pri_idx[1]);
 	}
 }

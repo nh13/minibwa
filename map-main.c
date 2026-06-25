@@ -406,6 +406,7 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
 	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
 	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
+	fprintf(fp, "    --pe-pair-primary  SAM primary follows the PE-pair-chosen endpoint (off by default)\n");
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -H STR           if STR starts with @, insert to header; or insert lines in file STR []\n");
@@ -529,6 +530,8 @@ int main_map(int argc, char *argv[])
 		} else if (c == 318) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
+		} else if (c == 315) { // --pe-pair-primary
+			mo.flag |= MB_F_PE_PAIR_PRI;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor

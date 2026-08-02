@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "minibwa.h"
@@ -32,7 +33,7 @@ static void mb_opt_reset(mb_opt_t *opt)
 	opt->pe_lo = 50, opt->pe_hi = 800;
 	// I/O options
 	opt->sb_len = 1000000;
-	opt->sb_seq = 24;
+	{ const char *e = getenv("MB_SB_SEQ"); opt->sb_seq = e && *e? atoi(e) : 24; }
 	opt->n_thread = 1;
 	opt->seed = 11;
 	opt->out_s = 0.8f;

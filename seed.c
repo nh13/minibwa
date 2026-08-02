@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
@@ -55,7 +56,16 @@ void mb_seed_intv(void *km, const mb_bwt_t *bwt, int32_t len, const uint8_t *seq
 
 void mb_seed_intv_batch(void *km, const mb_bwt_t *bwt, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v)
 { // identical to mb_seed_intv() though the order of intervals is often different
-	const int max_batch_size = 50;
+	/* MB_SMEM_BATCH: lockstep queue depth for the SMEM walk. Upstream hardcodes 50,
+	 * but the caller only ever supplies opt->sb_seq (24) FRAGMENTS -- 24 sequences
+	 * single-end, 48 paired -- so the queue never reaches the depth this code was
+	 * written for. Depth is what sets memory-level parallelism here, so it is worth
+	 * a sweep. Any batch composition/depth is result-preserving: mb_seed_sort_dedup
+	 * imposes a total order on (x[0], size, info) and info fixes the whole
+	 * bi-interval, so the post-sort seed array is canonical. Verified by md5. */
+	static int mbs = -1;
+	if (mbs < 0) { const char *e = getenv("MB_SMEM_BATCH"); mbs = e && *e? atoi(e) : 50; }
+	const int max_batch_size = mbs;
 	mb_smem_entry_t *s;
 	int32_t i, j, n_s, *nv;
 

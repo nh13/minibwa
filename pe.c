@@ -206,6 +206,35 @@ static void mb_pair_hits(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	kfree(km, pa);
 }
 
+/* Ablation level for the mate-rescue narrowing gate, read once from
+ * MB_RESCUE_GATE. One build serves the whole ladder, so no rung can differ from
+ * another by codegen or code layout -- which matters, because layout alone has
+ * been measured to move this kernel several percent.
+ *
+ * The stock gate is `max_ug >= 10 && max_ug >= len>>1 && n_good == 1`. Measured
+ * on 14,077 real rescue decisions, each condition blocks:
+ *     max_ug >= 10        0.2%
+ *     max_ug >= len>>1   70.2%
+ *     n_good == 1        74.8%
+ * so the last two are what hold minibwa's narrowing fire rate at 42.3%, against
+ * 94.8% for the ROC-validated k-mer rescue in bwa-mem3.
+ *
+ *   0  stock
+ *   1  drop n_good == 1
+ *   2  relax max_ug >= len>>1  to  len>>2
+ *   3  both of the above
+ *   4  keep only max_ug >= 10  (most aggressive)
+ */
+static int mb_rescue_gate_level(void)
+{
+	static int lvl = -1;
+	if (lvl < 0) { /* benign race: every thread computes the same value */
+		const char *s = getenv("MB_RESCUE_GATE");
+		lvl = s && *s? atoi(s) : 0;
+	}
+	return lvl;
+}
+
 static int32_t mb_ungap(void *km, int32_t qlen, const uint8_t *qseq, int32_t tlen, const uint8_t *tseq, int32_t kmer, l2b_meth_t mt, int32_t *max_i, int32_t *n_good, int32_t *n_kmer)
 { // a linear algorithm to find ungapped alignment
 	static uint8_t c2t[4] = { 0, 3, 2, 3 };
@@ -349,11 +378,19 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 			if (is_rev) mt = l2b_meth_rev(mt0);
 			l2b_getseq(l2b, h0->tid, ts, te, ref);
 			max_ug = mb_ungap(km, len, seq[is_rev], te - ts, ref, 7, mt, &max_i, &n_good, &n_kmer);
-			if (max_ug >= 10 && max_ug >= len>>1 && n_good == 1) {
-				ts2 = ts + max_i - len / 2;
-				te2 = ts2 + len * 2;
-				if (ts2 < ts) ts2 = ts;
-				if (te2 > te) te2 = te;
+			{	/* the stock gate, with conditions 2 and 3 ablatable -- see
+				 * mb_rescue_gate_level(). Level 0 is bit-for-bit the original. */
+				int lvl = mb_rescue_gate_level();
+				int ok_ug   = (max_ug >= 10);
+				int ok_span = (lvl == 2 || lvl == 3)? (max_ug >= len>>2)
+				            : (lvl == 4)? 1 : (max_ug >= len>>1);
+				int ok_good = (lvl == 1 || lvl == 3 || lvl == 4)? 1 : (n_good == 1);
+				if (ok_ug && ok_span && ok_good) {
+					ts2 = ts + max_i - len / 2;
+					te2 = ts2 + len * 2;
+					if (ts2 < ts) ts2 = ts;
+					if (te2 > te) te2 = te;
+				}
 			}
 			if (max_ug >= 10 || max_ug >= n_kmer * 0.33)
 				mb_matesw_align(km, opt, len, seq[is_rev], te2 - ts2, &ref[ts2 - ts], &ht, min_sc, mt, ez);

@@ -392,7 +392,7 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 	if (n_seg > 2) kom_sprintf_lite(s, "\tFI:i:%d", seg_idx);
 	if (r) {
 		write_tags(s, r);
-		if (opt_flag & MB_F_METH) write_meth_tags(s, l2b, t, n_seg, seg_idx, r);
+		if (opt->flag & MB_F_METH) write_meth_tags(s, l2b, t, n_seg, seg_idx, r);
 		// MC:Z mate CIGAR and MQ:i mate MAPQ; r_next is the mate's primary (see above).
 		if (n_seg > 1 && r_next && r_next->p && r_next->p->n_cigar > 0 && mate_qlen > 0) {
 			kom_sprintf_lite(s, "\tMC:Z:");

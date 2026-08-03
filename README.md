@@ -1,3 +1,35 @@
+
+<!-- DISTRO:BEGIN -->
+> **This is a downstream build of [lh3/minibwa](https://github.com/lh3/minibwa).**
+> It carries changes upstream declined, plus a few not yet offered. Upstream remains the source
+> of truth for everything else.
+>
+> **Install from a release tag, not from a branch.** Tags such as `v0.6-nh13.1` are immutable;
+> the `dist` branch is rebuilt and force-pushed on every upstream change and will rewind under
+> you. `minibwa version` reports the downstream version, and it appears in the `@PG VN:` tag of
+> every SAM file this build writes, so output is always traceable to the build that produced it.
+>
+> Bug reports for anything in the table below belong here, not upstream.
+> Changes investigated and deliberately not shipped are in [`GRAVEYARD.md`](GRAVEYARD.md).
+
+| feature | upstream | status | output | summary |
+|---|---|---|---|---|
+| `ops-distro` | — | unsubmitted | identical | distribution manifest, assembly engine and workflows |
+| `ll-affine-reassoc` | [lh3/minibwa#37](https://github.com/lh3/minibwa/pull/37) | rejected | identical | reassociate the affine-gap recurrence in ksw2_ll for arm64 |
+| `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two |
+| `index-threads-v2` | — | unsubmitted | identical | parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe) |
+| `extd2-avx512` | [lh3/minibwa#20](https://github.com/lh3/minibwa/pull/20) | open | identical | AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT |
+| `smem-search-memtraffic` | — | unsubmitted | identical | prefetch occ in the k-mer-cache path; -4.4% of SMEM time |
+| `inline-appenders` | [lh3/minibwa#32](https://github.com/lh3/minibwa/pull/32) | rejected | identical | format SAM/PAF records with inline appenders; +0.4-1.2% wall |
+| `parallel-encode` | [lh3/minibwa#33](https://github.com/lh3/minibwa/pull/33) | open | identical | format SAM/PAF in the mapping step instead of the output thread |
+| `pe-encode-vectorize` | — | unsubmitted | identical | split paired-end query encoding so the revcomp auto-vectorizes |
+| `meth-cleanups` | [lh3/minibwa#19](https://github.com/lh3/minibwa/pull/19) | rejected | identical | a --meth CI test; documents the mb_align1_inv strand flip and b_ts (comments only) |
+| `meth-sam-tags` | [lh3/minibwa#15](https://github.com/lh3/minibwa/pull/15) | open | conditional | emit Bismark-compatible XR/XG/XM tags |
+| `soft-clip-penalty` | [lh3/minibwa#13](https://github.com/lh3/minibwa/pull/13) | rejected | conditional | 5'/3' soft-clip penalty (-L) |
+| `submem-ablation` | [lh3/minibwa#12](https://github.com/lh3/minibwa/pull/12) | rejected | conditional | expose --max-sub-occ and --min-sub-occ ablation flags |
+| `alt-liftgroup` | — | unsubmitted | conditional | ALT-aware mapping via post-extension liftover groups |
+<!-- DISTRO:END -->
+
 [![GitHub Downloads](https://img.shields.io/github/downloads/lh3/minibwa/total.svg?style=social&logo=github&label=Download)](https://github.com/lh3/minibwa/releases)
 [![Bioconda](https://img.shields.io/conda/dn/bioconda/minibwa.svg?style=flag&label=bioconda)](https://bioconda.github.io/recipes/minibwa/README.html)
 [![Homebrew](https://img.shields.io/homebrew/v/minibwa)](https://formulae.brew.sh/formula/minibwa)

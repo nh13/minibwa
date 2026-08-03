@@ -13,6 +13,19 @@
 #error "Missing SSE2 or NEON intrinsics"
 #endif
 
+/* s2n-lite.h has no _mm_shuffle_epi8; carry it here until this ships.
+ * NEON's vqtbl1q_u8 returns 0 for any index >= 16, while SSSE3's _mm_shuffle_epi8
+ * returns 0 only when bit 7 is set -- they agree on [0,15] and on [128,255] and
+ * disagree on [16,127]. Every index built below is <= 12, so this is exact here.
+ * It is NOT a general _mm_shuffle_epi8. */
+#if defined(__ARM_NEON)
+static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return vqtbl1q_u8(a, b); }
+static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return veorq_u8(a, b); }
+#else
+static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return _mm_shuffle_epi8(a, b); }
+static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return _mm_xor_si128(a, b); }
+#endif
+
 static inline __m128i ksw_i8x4_to_i32x4(const int8_t *x)
 {
 #if defined(__ARM_NEON)
@@ -61,7 +74,10 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 	int with_cigar = !(flag&KSW_EZ_SCORE_ONLY), approx_max = !!(flag&KSW_EZ_APPROX_MAX);
 	int32_t *H = 0, H0 = 0, last_H0_t = 0;
 	uint8_t *qr, *sf, *mem, *mem2 = 0;
-	__m128i q_, q2_, qe_, qe2_, zero_, sc_mch_, sc_mis_, m1_, sc_N_;
+	/* sc_mis_, m1_ and sc_N_ are gone: the LUT is now the only consumer of the
+	 * mismatch, wildcard and N scores, and it holds them as table entries. */
+	__m128i q_, q2_, qe_, qe2_, zero_, sc_mch_, pmat_;
+	int use_lut;
 	__m128i *u, *v, *x, *y, *x2, *y2, *s, *p = 0;
 
 	ksw_reset_extz(ez);
@@ -75,9 +91,18 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 	qe_     = _mm_set1_epi8(q + e);
 	qe2_    = _mm_set1_epi8(q2 + e2);
 	sc_mch_ = _mm_set1_epi8(mat[0]);
-	sc_mis_ = _mm_set1_epi8(mat[1]);
-	sc_N_   = mat[m*m-1] == 0? _mm_set1_epi8(-e2) : _mm_set1_epi8(mat[m*m-1]);
-	m1_     = _mm_set1_epi8(m - 1); // wildcard
+	/* XOR-indexed substitution LUT, built once per call. Only the symmetric path
+	 * uses it; KSW_EZ_GENERIC_SC keeps the scalar mat[] lookup below. */
+	use_lut = !(flag & KSW_EZ_GENERIC_SC);
+	if (use_lut) {
+		int8_t pmat[16];
+		int8_t w_N = mat[m*m-1] == 0? (int8_t)-e2 : mat[m*m-1];
+		int lt;
+		pmat[0] = mat[0];                                  /* match            */
+		pmat[1] = pmat[2] = pmat[3] = mat[1];              /* ACGT mismatch    */
+		for (lt = 4; lt < 16; ++lt) pmat[lt] = w_N;        /* anything with N  */
+		pmat_ = _mm_loadu_si128((const __m128i*)pmat);
+	} else pmat_ = zero_;
 
 	if (w < 0) w = tlen > qlen? tlen : qlen;
 	wl = wr = w;
@@ -117,7 +142,16 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 		off_end = off + qlen + tlen - 1;
 	}
 
-	for (t = 0; t < qlen; ++t) qr[t] = query[qlen - 1 - t];
+	if (use_lut) {
+		/* query-N -> 8, which keeps every sf ^ qrr index <= 12. Confined to the
+		 * prepass: qr[] has no other reader. */
+		for (t = 0; t < qlen; ++t) {
+			uint8_t c = query[qlen - 1 - t];
+			qr[t] = c == m - 1? 8 : c;
+		}
+	} else {
+		for (t = 0; t < qlen; ++t) qr[t] = query[qlen - 1 - t];
+	}
 	memcpy(sf, target, tlen);
 
 	for (r = 0, last_st = last_en = -1; r < qlen + tlen - 1; ++r) {
@@ -154,21 +188,14 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 			u8[r] = r == 0? -q - e : r < long_thres? -e : r == long_thres? long_diff : -e2;
 		}
 		// loop fission: set scores first
-		if (!(flag & KSW_EZ_GENERIC_SC)) {
+		if (use_lut) {
+			/* 5 ops -> 2: one XOR, one byte shuffle. */
 			for (t = st0; t <= en0; t += 16) {
-				__m128i sq, st, tmp, mask;
+				__m128i sq, st;
 				sq = _mm_loadu_si128((__m128i*)&sf[t]);
 				st = _mm_loadu_si128((__m128i*)&qrr[t]);
-				mask = _mm_or_si128(_mm_cmpeq_epi8(sq, m1_), _mm_cmpeq_epi8(st, m1_));
-				tmp = _mm_cmpeq_epi8(sq, st);
-#ifdef __SSE4_1__
-				tmp = _mm_blendv_epi8(sc_mis_, sc_mch_, tmp);
-				tmp = _mm_blendv_epi8(tmp,     sc_N_,   mask);
-#else
-				tmp = _mm_or_si128(_mm_andnot_si128(tmp,  sc_mis_), _mm_and_si128(tmp,  sc_mch_));
-				tmp = _mm_or_si128(_mm_andnot_si128(mask, tmp),     _mm_and_si128(mask, sc_N_));
-#endif
-				_mm_storeu_si128((__m128i*)((int8_t*)s + t), tmp);
+				_mm_storeu_si128((__m128i*)((int8_t*)s + t),
+								 mbsb_shuffle_epi8(pmat_, mbsb_xor_si128(sq, st)));
 			}
 		} else {
 			for (t = st0; t <= en0; ++t)

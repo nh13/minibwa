@@ -52,10 +52,32 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: git push --force origin "${HEAD_SHA}:refs/heads/dist"
       - name: Close the PR
+        # The force-push above makes this PR's head an ancestor of its base, so
+        # GitHub marks the PR MERGED on its own -- asynchronously, so whether
+        # that lands before or after this step is a race. `gh pr close` errors
+        # on an already-merged PR, which took the run red *after* the push that
+        # was its entire job had succeeded; a red run on a good ship is how
+        # people learn to stop reading ship runs.
+        #
+        # The postcondition is "this PR is not left open", not "this step ran
+        # `gh pr close`" -- so assert the end state. That is what keeps the
+        # `|| true` honest: a close that fails and leaves the PR open still
+        # fails the step, so a genuine auth or API error cannot pass as the
+        # benign race.
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          gh pr comment "${{ github.event.pull_request.number }}" \
+          gh pr comment "$PR_NUMBER" \
             --body "\`dist\` force-updated to \`${HEAD_SHA:0:7}\`."
-          gh pr close "${{ github.event.pull_request.number }}"
+          STATE=$(gh pr view "$PR_NUMBER" --json state --jq .state)
+          if [ "$STATE" = "OPEN" ]; then
+            gh pr close "$PR_NUMBER" || true
+            STATE=$(gh pr view "$PR_NUMBER" --json state --jq .state)
+          fi
+          if [ "$STATE" = "OPEN" ]; then
+            echo "PR #$PR_NUMBER is still open after the close attempt" >&2
+            exit 1
+          fi
+          echo "PR #$PR_NUMBER is $STATE; dist is at ${HEAD_SHA:0:7}"

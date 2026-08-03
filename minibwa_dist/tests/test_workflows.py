@@ -56,6 +56,10 @@ def _reconcile() -> dict[str, object]:
     return _parsed("distro-reconcile.yml")
 
 
+def _ship() -> dict[str, object]:
+    return _parsed("distro-ship.yml")
+
+
 def _test_workflow() -> dict[str, object]:
     return _parsed("distro-test.yml")
 
@@ -469,6 +473,74 @@ def test_the_nochange_guard_ignores_only_derived_artifacts() -> None:
     assert "#define MB_VERSION" in script
     assert "':!minibwa.h'" not in script, "excluding minibwa.h wholesale would hide feature changes"
     assert "nochange=1" in script
+
+
+def test_the_ship_step_survives_github_marking_the_pr_merged_itself() -> None:
+    """Force-updating `dist` to this PR's head makes that head an ancestor of
+    the base branch, so GitHub marks the PR MERGED on its own -- asynchronously,
+    so whether that lands before or after this step is a race. `gh pr close`
+    errors on an already-merged PR, so the ship run went red *after* the push
+    that was its entire job had succeeded. A red run on a good ship is how
+    people learn to stop reading ship runs.
+
+    The postcondition asserted here is "this PR is not left open", never "this
+    step called `gh pr close`" -- checking the call would reject a perfectly
+    good attempt-then-verify rewrite, and the end state is the thing that
+    matters. The third arm is what carries the test: the obvious fix, a bare
+    `gh pr close || true`, passes the first two and fails only that one,
+    because it would swallow a genuine auth or API failure and leave the PR
+    open with the run still green.
+    """
+    script = _run(_ship(), "ship", "Close the PR")
+    state_file = _mktemp_path()
+    log = _mktemp_path()
+    gh_stub = f"""
+    echo "$*" >> "{log}"
+    case "$1 $2" in
+      "pr comment") exit 0 ;;
+      "pr view") cat "{state_file}" ;;
+      "pr close")
+        rc="${{CLOSE_EXIT:-0}}"
+        [ "$rc" -eq 0 ] && echo CLOSED > "{state_file}"
+        exit "$rc" ;;
+      *) echo "unexpected gh $*" >&2; exit 99 ;;
+    esac
+    """
+
+    def ship(initial_state: str, close_exit: str = "0") -> tuple[int, str]:
+        state_file.write_text(f"{initial_state}\n")
+        log.write_text("")
+        result = _sh(
+            script,
+            stubs={"gh": gh_stub},
+            extra_env={
+                "PR_NUMBER": "17",
+                "HEAD_SHA": "800583d3fa9a6658c4a4f3254070929886163ac8",
+                "CLOSE_EXIT": close_exit,
+            },
+        )
+        return result.returncode, log.read_text()
+
+    already_merged_rc, _ = ship("MERGED")
+    assert already_merged_rc == 0, (
+        "GitHub auto-merging the PR is the expected outcome of the force-push, not a failure: "
+        f"rc={already_merged_rc}"
+    )
+
+    open_rc, open_log = ship("OPEN")
+    assert open_rc == 0, f"a still-open PR must be closed cleanly: rc={open_rc}"
+    assert "pr close" in open_log, (
+        f"the race can go the other way -- an open PR must still be closed: {open_log!r}"
+    )
+
+    stuck_rc, _ = ship("OPEN", close_exit="1")
+    assert stuck_rc != 0, (
+        "a close that fails and leaves the PR open must fail the step -- this is the arm a bare "
+        f"`|| true` gets wrong: rc={stuck_rc}"
+    )
+
+    state_file.unlink(missing_ok=True)
+    log.unlink(missing_ok=True)
 
 
 def test_the_test_workflow_pins_its_python_tooling() -> None:

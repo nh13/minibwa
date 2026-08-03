@@ -37,6 +37,7 @@ static void mb_opt_reset(mb_opt_t *opt)
 	opt->seed = 11;
 	opt->out_s = 0.8f;
 	opt->xa_max = 5;
+	opt->meth_tags = MB_METH_TAG_ALL;
 	opt->max_sw_mat = 100000000;
 	opt->cap_kalloc = 1UL<<28;
 	opt->max_mb_size = 1000000000;

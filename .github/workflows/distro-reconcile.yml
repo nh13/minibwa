@@ -1,0 +1,152 @@
+name: distro-reconcile
+
+on:
+  schedule:
+    - cron: "31 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+# Belt and braces: this workflow never adds an `upstream` remote today, but `gh`
+# prefers a remote named `upstream` over `origin` when both are present, and
+# this job is one added remote away from filing its issues and PRs against
+# lh3/minibwa instead of this fork. Pin explicitly rather than rely on absence.
+env:
+  GH_REPO: ${{ github.repository }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ops/distro
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Collect live PR states
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' > /tmp/prs.json
+          import json, subprocess, pathlib
+          from minibwa_dist.manifest import load_manifest
+          # Read the manifest through its own validated loader rather than
+          # hand-digging the TOML: schema knowledge belongs in one place, and
+          # this step used to disagree with a second hand-parse elsewhere about
+          # what a manifest with no [[feature]] table even means.
+          features = load_manifest(pathlib.Path("minibwa_dist/features.toml")).features
+          prs = [f.upstream.pr for f in features if f.upstream.pr is not None]
+          out = {}
+          for pr in prs:
+              data = json.loads(subprocess.run(
+                  ["gh", "pr", "view", str(pr), "--repo", "lh3/minibwa",
+                   "--json", "state,mergedAt"],
+                  capture_output=True, text=True, check=True).stdout)
+              out[pr] = "merged" if data.get("mergedAt") else data["state"].lower()
+          print(json.dumps(out))
+          PY
+
+      - name: Reconcile and rewrite the manifest
+        run: |
+          python -m minibwa_dist.cli reconcile --pr-states /tmp/prs.json --write > /tmp/rec.json
+          cat /tmp/rec.json
+
+      - name: Open a PR correcting stale statuses
+        # A manifest that can lie is worse than no manifest (design section 7C).
+        # Dedupe the way distro-sync.yml does: look up an open PR by head branch
+        # before creating one. Without this, a same-day re-dispatch fails on the
+        # PR `gh pr create` refuses to duplicate, and a later week -- a new date,
+        # so a new branch name -- piles a fresh, never-merged reconcile PR on top
+        # of last week's instead of updating it.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --quiet -- minibwa_dist/features.toml && exit 0
+          git config user.name  "minibwa-distro-bot"
+          git config user.email "noreply@github.com"
+
+          # Reuse any still-open reconcile PR's head branch, whatever date it
+          # was opened under, instead of always minting today's. `gh pr list`
+          # does not document a stable order, so more than one open
+          # `reconcile/*` PR (a stale one left behind by a bug, say) would
+          # otherwise pick whichever one the API happened to return first.
+          # Branch names are `reconcile/YYYYMMDD`, so sorting them and taking
+          # the last is sorting by date -- deterministically the newest.
+          EXISTING_BRANCH=$(gh pr list --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("reconcile/"))] | sort_by(.headRefName) | (.[-1].headRefName // empty)')
+          BRANCH="${EXISTING_BRANCH:-reconcile/$(date -u +%Y%m%d)}"
+
+          git checkout -B "$BRANCH"
+          git add -- minibwa_dist/features.toml
+          git -c commit.gpgsign=false commit -m "chore(distro): reconcile upstream PR statuses"
+          git push --force origin "$BRANCH"
+
+          SUMMARY=$(jq -r '.changes[] | "- `\(.feature)`: \(.old) -> \(.new)"' /tmp/rec.json)
+          GRAD=$(jq -r 'if (.graduated|length)==0 then "None."
+                        else (.graduated[] | "- `\(.)` — upstream now carries this, so its [[feature]] block is deleted in this PR (design 7C). The manifest cannot hold a merged feature: the build would re-merge what master already has.")
+                        end' /tmp/rec.json)
+          BODY=$(printf '%s\n\n%s\n\n## Graduated\n\n%s\n' \
+            'Recorded statuses no longer match the live PR state:' "$SUMMARY" "$GRAD")
+
+          NUM=$(gh pr list --head "$BRANCH" --base ops/distro --state open \
+                  --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh pr edit "$NUM" --body "$BODY"
+          else
+            gh pr create --head "$BRANCH" --base ops/distro \
+              --title "chore(distro): reconcile upstream PR statuses" --body "$BODY"
+          fi
+
+      - name: Monthly upstreaming nominations
+        # Only on the first Monday of the month. `withdrawn` work is structurally
+        # excluded by nomination_candidates() -- that is why the status exists.
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ "$(date -u +%d)" -le 07 ] || exit 0
+          N=$(jq -r '.nominations | length' /tmp/rec.json)
+          [ "$N" != "0" ] || exit 0
+          # A stable title, for the same reason distro-sync.yml's dropped-features
+          # step gives: the dedupe searches by title, so any varying token in it
+          # defeats the dedupe. The count is exactly such a token -- offer one
+          # feature upstream and next month's "4 feature(s)" no longer matches the
+          # still-open "5 feature(s)" issue, and a duplicate is filed. Conversely
+          # an unchanged count with a changed set used to suppress the update
+          # entirely, so on a dedupe hit edit the body rather than exiting.
+          TITLE="upstream: features never offered to lh3/minibwa"
+          BODY=$(printf '%s\n\n%s\n' \
+            "These ${N} feature(s) carry status \`unsubmitted\` — upstream has never seen them. Worth offering, or worth recording why not:" \
+            "$(jq -r '.nominations[] | "- [ ] `\(.)`"' /tmp/rec.json)")
+          NUM=$(gh issue list --state open --search "$TITLE in:title" --json number \
+                  --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: File an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # distro-sync.yml has had this since the start; this workflow had not,
+          # so a reconciler that wedged itself went quiet instead of loud, and
+          # nothing would have said so until someone noticed statuses drifting.
+          # Stable title, deduped the same way.
+          TITLE="reconcile: run failed"
+          gh issue list --state open --search "$TITLE in:title" --json number \
+            --jq '.[0].number // empty' | grep -q . && exit 0
+          gh issue create --title "$TITLE" \
+            --body "distro-reconcile failed; recorded upstream statuses may be stale. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

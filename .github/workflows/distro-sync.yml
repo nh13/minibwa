@@ -1,0 +1,269 @@
+name: distro-sync
+
+# Assemble `dist-next` from upstream plus the manifest. Runs on a schedule and
+# on demand; `dist` itself is only advanced by distro-ship.yml.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+# `gh` resolves the base repo from git remotes, and prefers a remote named
+# `upstream` over `origin` when both are present -- which this job always has,
+# once it adds the `upstream` remote below. Without this pin, every `gh pr`/
+# `gh issue` call below would target lh3/minibwa instead of this fork.
+env:
+  GH_REPO: ${{ github.repository }}
+
+# `bash -e` is the Actions default; `-o pipefail` is NOT. Without this, a failed
+# assembly piped into `tee` exits 0 and the job goes on to build, gate and push a
+# tree that was never assembled.
+defaults:
+  run:
+    shell: bash
+
+# A manual dispatch overlapping the nightly cron would give two runs force-pushing
+# `dist-next` AND `rerere-cache` concurrently, where one can drop the other's
+# newly recorded pre-images -- that attacks the cache the whole design rests on.
+# Serialize; never cancel a run already mid-push.
+concurrency:
+  group: distro-sync
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ops/distro
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Configure git
+        run: |
+          git config user.name  "minibwa-distro-bot"
+          git config user.email "noreply@github.com"
+          git config rerere.enabled true
+          git config rerere.autoUpdate true
+
+      - name: Fetch the fork, then upstream
+        # Order matters: the fork's `master` is often behind lh3's, so upstream
+        # must land second or the assembly base silently reverts to the stale copy.
+        # Feature branches go to refs/remotes/origin/* -- fetching them into
+        # refs/heads/* is REFUSED outright while ops/distro is checked out
+        # (`fatal: refusing to fetch into branch`), which would fetch nothing at all.
+        run: |
+          git fetch --force origin '+refs/heads/*:refs/remotes/origin/*'
+          # A blanket `|| true` here would make a network or auth failure
+          # indistinguishable from "the branch does not exist yet" -- and the
+          # save step answers the second by building a fresh orphan, which a
+          # push would then publish over every resolution ever recorded.
+          # `ls-remote --exit-code` separates them: exit 2 is "no matching ref"
+          # (a genuine first run), anything else non-zero is a real failure and
+          # must take the job down rather than be silently absorbed.
+          if git ls-remote --exit-code --heads origin rerere-cache >/dev/null; then
+            git fetch --force origin '+refs/heads/rerere-cache:refs/heads/rerere-cache'
+          else
+            rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "could not reach origin for rerere-cache (exit $rc)" >&2
+              exit "$rc"
+            fi
+            echo "no rerere-cache branch on the fork yet -- first run"
+          fi
+          # `gh` prefers a remote named `upstream` over `origin` when resolving
+          # the base repo -- this remote's presence is exactly why the
+          # workflow-level GH_REPO pin above is required, not optional.
+          git remote add upstream https://github.com/lh3/minibwa.git 2>/dev/null || true
+          git fetch --force upstream '+refs/heads/master:refs/heads/master'
+          git push origin master:master
+
+      # Design section 3 (every manifest branch must live in the fork, since a
+      # branch that exists only upstream is one prune away from taking the build
+      # down) used to have a "Verify branch custody" step here, hand-parsing
+      # features.toml and running the same `rev-parse --verify` per branch.
+      # `assemble()` does exactly that check, over the same inputs, before it
+      # touches anything -- and unlike the step it was tested, it reports every
+      # missing branch at once, and its exit 1 stops this job just as dead.
+      - name: Assemble dist-next
+        id: assemble
+        # Redirect, do not pipe: `| tee` would mask a nonzero exit from the CLI.
+        run: |
+          python -m minibwa_dist.cli sync --repo . --base master --out dist-next \
+            --remote origin --stamp > /tmp/assembly.json
+          cat /tmp/assembly.json
+          # Bare assignments, not `echo "x=$(jq ...)"` -- `echo`'s own exit
+          # status is what `set -e` inspects, and `echo` always succeeds even
+          # when the jq inside its command substitution fails. A simple
+          # `var=$(cmd)` assignment takes cmd's exit status, so `-e` bites here.
+          dropped=$(jq -c '[.dropped[].name]' /tmp/assembly.json)
+          version=$(jq -r '.version' /tmp/assembly.json)
+          { echo "dropped=$dropped"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate the front page and record what this build contains
+        # dist-manifest.json travels with the build, so the release job can name
+        # the features that were dropped -- design section 7B, "a dropped feature
+        # must never be silent". `git checkout dist-next` (not a worktree) is
+        # correct here: `ops-distro` is the first [[feature]] in the manifest, so
+        # every assembled dist-next already carries minibwa_dist/ -- the CLI it is
+        # about to invoke exists on the branch being checked out.
+        run: |
+          git checkout dist-next
+          python -m minibwa_dist.cli docs
+          cp /tmp/assembly.json dist-manifest.json
+          git add -- README.md GRAVEYARD.md dist-manifest.json
+          if ! git diff --cached --quiet; then
+            git -c commit.gpgsign=false commit \
+              -m "docs: regenerate the front page and record the build manifest"
+          fi
+
+      - name: Build and test
+        run: |
+          make -j"$(nproc)"
+          make -j"$(nproc)" -C api-test
+
+      - name: Build without OpenMP
+        # Design gate 8.1. index-threads-v2 rides upstream's LIBSAIS_OPENMP probe;
+        # this proves it still compiles and links when the probe says no.
+        run: make clean && make -j"$(nproc)" omp=0 && make clean
+
+      - name: Output gates
+        # `--assembly` scopes the reported coverage to what actually merged: an
+        # optional feature that conflicted is not in this binary, and a gate that
+        # names it as covered contradicts the drop list this same job publishes.
+        run: |
+          make -j"$(nproc)"
+          git worktree add /tmp/stock master
+          make -C /tmp/stock -j"$(nproc)"
+          python -m minibwa_dist.cli gates \
+            --candidate ./minibwa --stock /tmp/stock/minibwa \
+            --fixtures ./test --workdir /tmp/gates \
+            --assembly /tmp/assembly.json
+
+      - name: Re-parent dist-next onto dist
+        # dist and dist-next are otherwise INDEPENDENT assemblies of the same
+        # features, so their merge base is a feature commit and GitHub reports
+        # every sync PR as CONFLICTING -- a permanent red banner that trains
+        # people to stop reading it. Keep the assembled TREE (that is the
+        # reproducible artifact) but give it dist as its parent, so the PR diff
+        # is exactly "what changed since the last shipped dist" and shipping is
+        # a fast-forward rather than a rewind.
+        run: |
+          if ! git rev-parse --verify -q refs/remotes/origin/dist >/dev/null; then
+            echo "no dist yet -- first run, nothing to re-parent"
+            exit 0
+          fi
+          TREE=$(git rev-parse dist-next^{tree})
+          if [ "$TREE" = "$(git rev-parse origin/dist^{tree})" ]; then
+            echo "assembled tree is identical to dist; nothing to ship"
+            echo "nochange=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          UPSTREAM_SHA=$(git rev-parse --short master)
+          NEW=$(git commit-tree "$TREE" -p origin/dist \
+                  -m "sync: assemble ${{ steps.assemble.outputs.version }} on upstream ${UPSTREAM_SHA}")
+          git branch -f dist-next "$NEW"
+          git checkout -q dist-next
+        id: reparent
+
+      - name: Push dist-next and open the review PR
+        if: steps.reparent.outputs.nochange != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push --force origin dist-next
+          UPSTREAM_SHA=$(git rev-parse --short master)
+          UPSTREAM_FULL=$(git rev-parse master)
+          MERGED=$(jq -r '.merged | join(", ")' /tmp/assembly.json)
+          DROPPED=$(jq -r 'if (.dropped|length)==0 then "none"
+                           else [.dropped[].name]|join(", ") end' /tmp/assembly.json)
+          BODY=$(printf '%s\n' \
+            "Assembled as \`${{ steps.assemble.outputs.version }}\` on upstream [\`${UPSTREAM_SHA}\`](https://github.com/lh3/minibwa/commit/${UPSTREAM_FULL})." \
+            "" "**Merged:** ${MERGED}" "**Dropped:** ${DROPPED}" "" \
+            "Add the \`ship\` label to advance \`dist\` to this commit.")
+          # Reuse an open PR if there is one; a shipped PR is closed, so a new
+          # cycle opens a fresh one rather than resurrecting the old.
+          NUM=$(gh pr list --head dist-next --base dist --state open \
+                  --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh pr edit "$NUM" --body "$BODY"
+          else
+            gh pr create --head dist-next --base dist \
+              --title "sync: upstream ${UPSTREAM_SHA}" --body "$BODY"
+          fi
+
+      - name: Save the rerere cache
+        if: always()
+        # Deliberately NOT `--force`, and deliberately not `|| true`. A fresh
+        # orphan -- the shape the cache module builds when it finds no local
+        # branch -- shares no history with the published branch, so a plain push
+        # is rejected as non-fast-forward instead of overwriting every
+        # accumulated resolution; a legitimate incremental save is a linear
+        # commit on top of what was fetched and fast-forwards cleanly. A
+        # rejection here means the cache did not restore, which is worth a red
+        # job: silencing it is what let the wipe happen unnoticed.
+        run: |
+          if git rev-parse --verify -q refs/heads/rerere-cache >/dev/null; then
+            git push origin rerere-cache
+          else
+            echo "no local rerere-cache branch to push"
+          fi
+
+      - name: File an issue for dropped features
+        if: steps.assemble.outputs.dropped != '[]' && steps.assemble.outputs.dropped != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A stable title with no varying sha: a persistently unmergeable
+          # feature would otherwise file one issue per night, forever, training
+          # the maintainer to ignore the channel -- exactly the failure mode
+          # distro-reconcile.yml's own dedupe already guards against. The sha
+          # goes in the body instead. Render the feature list as a comma-joined
+          # name list for the title, not the raw JSON output value.
+          NAMES=$(jq -r '.dropped[].name' /tmp/assembly.json | paste -sd, -)
+          TITLE="sync: dropped ${NAMES} -- would not merge"
+          gh issue list --state open --search "$TITLE in:title" --json number \
+            --jq '.[0].number // empty' | grep -q . && exit 0
+          DETAIL=$(jq -r '.dropped[] | "- **\(.name)** conflicts in: \(.files | join(", "))"' \
+                     /tmp/assembly.json)
+          SHA=$(git rev-parse --short master); FULL=$(git rev-parse master)
+          gh issue create \
+            --title "$TITLE" \
+            --body "$(printf '%s\n\n%s\n\nUpstream was at [`%s`](https://github.com/lh3/minibwa/commit/%s) when this ran.\n' \
+              'These optional features would not merge and rerere had no recorded resolution. They are excluded from the current build and will return once resolved.' \
+              "$DETAIL" "$SHA" "$FULL")"
+
+      - name: File an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Stable title, deduped the same way -- a wedged build should not
+          # file a fresh issue every night it stays broken.
+          # Do not name a specific step: `if: failure()` fires for ANY failed step,
+          # so "build failed" was wrong whenever the gates or the PR step were the
+          # ones that broke. The run link is what identifies the actual step.
+          TITLE="sync: run failed"
+          gh issue list --state open --search "$TITLE in:title" --json number \
+            --jq '.[0].number // empty' | grep -q . && exit 0
+          SHA=$(git rev-parse --short master 2>/dev/null || echo unknown)
+          FULL=$(git rev-parse master 2>/dev/null || echo "")
+          if [ -n "$FULL" ]; then
+            UP="[\`${SHA}\`](https://github.com/lh3/minibwa/commit/${FULL})"
+          else
+            UP="\`${SHA}\`"
+          fi
+          gh issue create --title "$TITLE" \
+            --body "distro-sync failed while assembling against upstream ${UP}. \`dist\` is unchanged -- it is only ever advanced by distro-ship on a labelled PR.
+
+          The failing step is named in the run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          This issue is deduped by title, so it will not refile while it stays open."

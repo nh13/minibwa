@@ -1,0 +1,155 @@
+# The minibwa distribution manifest. See ephemeral/2026-08-01-...-design.md.
+#
+# Merge order is significant: disjoint features first, the hub (alt-liftgroup) last.
+# `required = true` aborts the build on conflict; false drops the feature and files an issue.
+
+# --- tooling: must be present on `dist` so scheduled workflows can run ---
+[[feature]]
+name = "ops-distro"
+branch = "ops/distro"
+required = true
+output = "identical"
+# Never offer this upstream: it is the distribution's own machinery, not a
+# change to the aligner. Marked here so `nomination_candidates` does not have to
+# know this one entry's name.
+upstreamable = false
+summary = "distribution manifest, assembly engine and workflows"
+upstream = { status = "unsubmitted" }
+
+# --- minimal feature-vs-feature overlap: mostly conflict only with upstream ---
+# Exception: single-copy-parser and extd2-avx512 both edit Makefile, so they can
+# also conflict with each other.
+[[feature]]
+name = "ll-affine-reassoc"
+branch = "perf/ll-sse-affine-reassoc-arm"
+required = false
+output = "identical"
+summary = "reassociate the affine-gap recurrence in ksw2_ll for arm64"
+upstream = { pr = 37, status = "rejected" }
+
+[[feature]]
+name = "single-copy-parser"
+branch = "feat/single-copy-parser"
+required = false
+output = "identical"
+summary = "read FASTQ records with a single copy instead of two"
+upstream = { status = "unsubmitted" }
+
+[[feature]]
+name = "index-threads-v2"
+branch = "feat/index-threads-v2"
+required = false
+output = "identical"
+summary = "parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe)"
+upstream = { status = "unsubmitted" }
+
+[[feature]]
+name = "extd2-avx512"
+branch = "extd2-avx512-dispatch"
+required = false
+output = "identical"
+summary = "AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT"
+upstream = { pr = 20, status = "open" }
+
+[[feature]]
+name = "smem-search-memtraffic"
+branch = "perf/smem-search-memtraffic"
+required = false
+output = "identical"
+summary = "prefetch occ in the k-mer-cache path; -4.4% of SMEM time"
+upstream = { status = "unsubmitted" }
+
+# --- shared-file features ---
+[[feature]]
+name = "inline-appenders"
+branch = "feat/inline-appenders"
+required = false
+output = "identical"
+summary = "format SAM/PAF records with inline appenders; +0.4-1.2% wall"
+upstream = { pr = 32, status = "rejected" }
+
+[[feature]]
+name = "parallel-encode"
+branch = "feat/parallel-encode"
+required = false
+output = "identical"
+summary = "format SAM/PAF in the mapping step instead of the output thread"
+upstream = { pr = 33, status = "open" }
+
+[[feature]]
+name = "pe-encode-vectorize"
+branch = "perf/pe-encode-vectorize"
+required = false
+output = "identical"
+summary = "split paired-end query encoding so the revcomp auto-vectorizes"
+upstream = { status = "unsubmitted" }
+
+[[feature]]
+name = "meth-cleanups"
+branch = "chore/meth-cleanups"
+required = false
+output = "identical"
+# Genuinely comment-only: the align.c hunk replaces a "TODO: check if this is
+# correct" with the explanation, leaving the code line byte-identical, and the
+# minibwa.h hunk documents b_ts. Plus one new CI test. No scoring change.
+summary = "a --meth CI test; documents the mb_align1_inv strand flip and b_ts (comments only)"
+upstream = { pr = 19, status = "rejected" }
+
+[[feature]]
+name = "meth-sam-tags"
+branch = "feat/issue-14-meth-sam-tags"
+required = false
+output = "conditional"
+condition = "--meth is set"
+negative = "align the chrM fixture without --meth; SAM must be byte-identical to stock"
+summary = "emit Bismark-compatible XR/XG/XM tags"
+upstream = { pr = 15, status = "open" }
+
+[[feature]]
+name = "soft-clip-penalty"
+branch = "feat/soft-clip-penalty"
+required = false
+output = "conditional"
+condition = "-L is set"
+negative = "align the chrM fixture without -L; SAM must be byte-identical to stock"
+summary = "5'/3' soft-clip penalty (-L)"
+upstream = { pr = 13, status = "rejected" }
+
+[[feature]]
+name = "submem-ablation"
+branch = "feat/submem-ablation"
+required = false
+output = "conditional"
+condition = "--max-sub-occ or --min-sub-occ is set"
+negative = "align the chrM fixture with neither flag; SAM must be byte-identical to stock"
+summary = "expose --max-sub-occ and --min-sub-occ ablation flags"
+upstream = { pr = 12, status = "rejected" }
+
+# --- the hub: touches 9 shared files, merges last, never blocks the build ---
+[[feature]]
+name = "alt-liftgroup"
+branch = "feat/alt-aware-liftgroup"
+required = false
+output = "conditional"
+condition = "the index has ALT contigs"
+negative = "align the chrM fixture (no ALT contigs); SAM must be byte-identical to stock"
+summary = "ALT-aware mapping via post-extension liftover groups"
+upstream = { status = "unsubmitted" }
+
+# --- the graveyard: never built, never nominated for upstreaming ---
+[[withdrawn]]
+name = "pe-mapq-low-copy-repeats"
+branch = "fix/pe-mapq-low-copy-repeats"
+report = "reports/2026-07-20-minibwa-meth-pe-mapq-wrongchrom-negative-result.md"
+summary = """AUC flat at -2.6e-5 and strictly dominated by raising the mapQ threshold: \
+unpatched at mapQ>=30 gives the same 1,336 errors as patched at mapQ>=20, with 69,269 more \
+correct reads. The wrong-chromosome tail is a base-rate artifact, not a calibration defect."""
+
+[[withdrawn]]
+name = "rescue-window-gate"
+branch = "perf/rescue-window-gate"
+report = "reports/2026-08-01-mate-rescue-window-gate.md"
+summary = """Large speedups (-5.5% WGS, -44.9% Hi-C) but every ablation level moves confident \
+placements on real data (WGS L4: 1 in 4,300 at MAPQ>=10). The simulated ROC that passed was the \
+wrong experiment. The Hi-C result survives as a different idea: skip rescue when the insert-size \
+distribution is uninformative."""

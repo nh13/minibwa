@@ -170,6 +170,9 @@ jobs:
           UPSTREAM_SHA=$(git rev-parse --short master)
           NEW=$(git commit-tree "$TREE" -p origin/dist \
                   -m "sync: assemble ${{ steps.assemble.outputs.version }} on upstream ${UPSTREAM_SHA}")
+          # Detach first: the regenerate step leaves the worktree ON dist-next,
+          # and git refuses to force-update a branch that is checked out.
+          git checkout -q --detach
           git branch -f dist-next "$NEW"
           git checkout -q dist-next
         id: reparent

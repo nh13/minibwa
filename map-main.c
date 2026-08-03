@@ -148,8 +148,12 @@ static void worker_for_format(void *data, long i, int tid)
 				int32_t n_sec = 0;
 				for (j = 0; j < s->n_hit[k]; ++j) {
 					const mb_hit_t *h = &s->hit[k][j];
-					if (h->parent == h->id || n_sec < opt->out_n) {
-						if (h->parent != h->id) {
+					// --alt-records means "emit ALT-contig alignments": it widens
+					// the outer secondary gate AND exempts the record from the
+					// --outs score filter, which postdates the feature.
+					int32_t alt_force = (opt->flag & MB_F_ALT_RECORDS) && h->is_alt;
+					if (h->parent == h->id || n_sec < opt->out_n || alt_force) {
+						if (h->parent != h->id && !alt_force) {
 							const mb_hit_t *p = &s->hit[k][h->parent];
 							if (p->p && h->p) {
 								if (h->p->dp_max < (double)opt->out_s * p->p->dp_max) continue;
@@ -390,6 +394,10 @@ static ko_longopt_t long_options[] = {
 	{ "outs",         ko_required_argument, 315 },
 	{ "max-sub-occ",  ko_required_argument, 316 }, // ablation: 0 disables Pass-2 sub-SMEM reseeding
 	{ "min-sub-occ",  ko_required_argument, 317 }, // ablation: skip Pass-2 for SMEMs with SA-interval size < N (default 1)
+	{ "alt",          ko_required_argument, 318 },
+	{ "alt-records",  ko_no_argument,       319 },
+	{ "alt-lift-tol", ko_required_argument, 320 },
+	{ "pe-pair-primary", ko_optional_argument, 321 },
 	{ "meth-tags",    ko_required_argument, 322 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
@@ -397,6 +405,8 @@ static ko_longopt_t long_options[] = {
 	{ "dbg-qname",    ko_no_argument,       604 },
 	{ "dbg-aln-pe",   ko_no_argument,       605 },
 	{ "dbg-an-pos",   ko_no_argument,       606 }, // anchor position
+	{ "dbg-no-alt-proj", ko_no_argument,    607 }, // ablate ALT->primary projection (testing)
+	{ "dbg-alt-proj", ko_no_argument,       608 }, // trace projected primary anchors (testing)
 	{ "version",      ko_no_argument,       901 },
 	{ "help",         ko_no_argument,       902 },
 	{ 0, 0, 0 }
@@ -447,6 +457,10 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    --outn=NUM       output up to {NUM,-N} secondary alignments [0]\n");
 	fprintf(fp, "    --outs=FLOAT     output a secondary hit if score at least FLOAT*bestScore [%g]\n", opt->out_s);
 	fprintf(fp, "    --xa=NUM         if <=NUM hits with score >%g%% of the best hit, output them to XA [%d]\n", opt->out_s*100.0, opt->xa_max);
+	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
+	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
+	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
+	fprintf(fp, "    --pe-pair-primary[=yes|no]  SAM primary follows the PE-pair-chosen endpoint [auto: on with .alt]\n");
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -H STR           if STR starts with @, insert to header; or insert lines in file STR []\n");
@@ -547,6 +561,7 @@ int main_map(int argc, char *argv[])
 	mb_idx_t *idx;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
+	const char *alt_fn = 0;
 	ketopt_t o = KETOPT_INIT;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 
@@ -636,6 +651,18 @@ int main_map(int argc, char *argv[])
 			mo.max_sub_occ = atoi(o.arg);
 		} else if (c == 317) { // --min-sub-occ
 			mo.min_sub_occ = atoi(o.arg);
+		} else if (c == 318) { // --alt
+			alt_fn = o.arg;
+		} else if (c == 319) { // --alt-records
+			mo.flag |= MB_F_ALT_RECORDS;
+		} else if (c == 320) { // --alt-lift-tol
+			mo.lift_tol = atoi(o.arg);
+			if (mo.lift_tol < 0) mo.lift_tol = 0;
+		} else if (c == 321) { // --pe-pair-primary[=yes|no]
+			if (o.arg == 0) mo.pe_pair_primary = 1; // bare flag forces on
+			else if (strcmp(o.arg, "yes") == 0 || strcmp(o.arg, "y") == 0) mo.pe_pair_primary = 1;
+			else if (strcmp(o.arg, "no") == 0 || strcmp(o.arg, "n") == 0) mo.pe_pair_primary = 0;
+			else fprintf(stderr, "[WARNING]\033[1;31m option '--pe-pair-primary' only accepts 'yes' or 'no'.\033[0m\n");
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -648,6 +675,10 @@ int main_map(int argc, char *argv[])
 			kom_dbg_flag |= MB_DBG_ALN_PE;
 		} else if (c == 606) { // --dbg-an-pos
 			kom_dbg_flag |= MB_DBG_AN_POS;
+		} else if (c == 607) { // --dbg-no-alt-proj
+			kom_dbg_flag |= MB_DBG_NO_ALT_PROJ;
+		} else if (c == 608) { // --dbg-alt-proj
+			kom_dbg_flag |= MB_DBG_ALT_PROJ;
 		} else if (c == 'K') {
 			mo.mb_size = mo.max_mb_size = kom_parse_num(o.arg, &s);
 			if (*s == ',') mo.max_mb_size = kom_parse_num(s + 1, &s);
@@ -685,6 +716,13 @@ int main_map(int argc, char *argv[])
 	is_meth = !!(mo.flag & MB_F_METH);
 	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
 	kom_assert(idx, "failed to load the index.");
+	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
+	/* Resolve the PE-pair-primary auto default now that the .alt (if any) is loaded:
+	 * on when ALT-aware, off otherwise -- which keeps plain `minibwa mem` (no .alt)
+	 * byte-identical to baseline.  An explicit --pe-pair-primary[=yes|no] overrides. */
+	if (mo.pe_pair_primary < 0) mo.pe_pair_primary = mb_idx_has_alt(idx) ? 1 : 0;
+	if (mo.pe_pair_primary) mo.flag |= MB_F_PE_PAIR_PRI;
+	else mo.flag &= ~MB_F_PE_PAIR_PRI;
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

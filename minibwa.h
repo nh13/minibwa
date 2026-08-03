@@ -24,6 +24,14 @@
 #define MB_F_NO_PAIRING       (0x10000LL)   // don't pair reads
 #define MB_F_METH             (0x20000LL)   // methylation mode
 
+// Bismark SAM tags emitted under MB_F_METH; selected by mb_opt_t::meth_tags.
+// These are a separate mask rather than MB_F_* bits because they are a
+// property of the methylation output only, not of the mapping mode.
+#define MB_METH_TAG_XR        (0x1)         // XR:Z read conversion
+#define MB_METH_TAG_XG        (0x2)         // XG:Z genome conversion
+#define MB_METH_TAG_XM        (0x4)         // XM:Z per-base methylation calls
+#define MB_METH_TAG_ALL       (MB_METH_TAG_XR | MB_METH_TAG_XG | MB_METH_TAG_XM)
+
 #define MB_CIGAR_MATCH      0
 #define MB_CIGAR_INS        1
 #define MB_CIGAR_DEL        2
@@ -80,6 +88,7 @@ typedef struct {
 	float out_s;
 	int32_t seed;
 	int32_t xa_max;
+	int32_t meth_tags; // MB_METH_TAG_* mask: which Bismark tags to emit under MB_F_METH
 	int64_t mb_size;  // mini-batch size
 	int64_t max_mb_size;
 	int64_t max_sw_mat;

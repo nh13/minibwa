@@ -16,25 +16,21 @@ static inline void write_tags(kstring_t *s, const mb_hit_t *p)
 	kom_sprintf_lite(s, "\tNM:i:%d\tAS:i:%d\tms:i:%d\tmd:i:%d", nm, p->p->dp_score, p->p->dp_max0, p->p->dp_max - p->p->dp_max2);
 }
 
-/* Bismark XR/XG/XM. Under directional --meth: XR follows mate (R1=CT,
- * R2=GA, SE=CT); XG = "GA" iff (is_R2 XOR r->rev), reproducing Bismark's
- * (XR,XG) -> {OT,OB,CTOT,CTOB} encoding.
- *
- * XM is a per-base methylation-call string of length qlen, written in
- * SAM SEQ orientation. SAM SEQ is always in top-strand-ref orientation
- * (sam_write_sq revcomps when r->rev), so a CIGAR-ordered walk over SEQ
- * positions produces a string that already aligns with SEQ in display
- * order; no end-of-walk reversal is needed.
+/* Build the Bismark XM:Z per-base methylation-call string, a NUL-terminated
+ * string of length qlen written in SAM SEQ orientation. SAM SEQ is always in
+ * top-strand-ref orientation (sam_write_sq revcomps when r->rev), so a
+ * CIGAR-ordered walk over SEQ positions produces a string that already aligns
+ * with SEQ in display order; no end-of-walk reversal is needed.
  *
  * Alphabet: . non-cytosine; z/Z CpG un/methylated; x/X CHG; h/H CHH;
- * u/U cytosine in unknown context (off the reference window or N base). */
-static void write_meth_tags(kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t,
-							int n_seg, int seg_idx, const mb_hit_t *r)
+ * u/U cytosine in unknown context (off the reference window or N base).
+ *
+ * Returns a malloc()ed string; the caller frees it. This is the expensive half
+ * of the methylation tags -- a reference window fetch plus a per-base walk, and
+ * a result that is as long as the read -- so it lives in its own function that
+ * write_meth_tags only calls when XM is actually selected. */
+static char *build_meth_xm(const l2b_t *l2b, const mb_bseq1_t *t, int xg_is_ga, const mb_hit_t *r)
 {
-	int is_r2 = (n_seg == 2 && seg_idx == 1);
-	int xg_is_ga = is_r2 ^ r->rev;
-	const char *xr = is_r2 ? "GA" : "CT";
-	const char *xg = xg_is_ga ? "GA" : "CT";
 	int qlen = t->l_seq;
 	int64_t tlen = l2b->ctg[r->tid].len;
 	int64_t fetch_st = r->ts >= 2 ? r->ts - 2 : 0;
@@ -114,9 +110,29 @@ next:
 		}
 	}
 
-	kom_sprintf_lite(s, "\tXR:Z:%s\tXG:Z:%s\tXM:Z:%s", xr, xg, xm);
 	free(ref);
-	free(xm);
+	return xm;
+}
+
+/* Bismark XR/XG/XM. Under directional --meth: XR follows mate (R1=CT,
+ * R2=GA, SE=CT); XG = "GA" iff (is_R2 XOR r->rev), reproducing Bismark's
+ * (XR,XG) -> {OT,OB,CTOT,CTOB} encoding.
+ *
+ * `tags` is an MB_METH_TAG_* mask (see --meth-tags). It only ever removes
+ * tags: with the default MB_METH_TAG_ALL the emitted bytes are exactly what
+ * this function wrote before the mask existed, in the same XR/XG/XM order. */
+static void write_meth_tags(kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t,
+							int n_seg, int seg_idx, const mb_hit_t *r, int32_t tags)
+{
+	int is_r2 = (n_seg == 2 && seg_idx == 1);
+	int xg_is_ga = is_r2 ^ r->rev;
+	if (tags & MB_METH_TAG_XR) kom_sprintf_lite(s, "\tXR:Z:%s", is_r2 ? "GA" : "CT");
+	if (tags & MB_METH_TAG_XG) kom_sprintf_lite(s, "\tXG:Z:%s", xg_is_ga ? "GA" : "CT");
+	if (tags & MB_METH_TAG_XM) {
+		char *xm = build_meth_xm(l2b, t, xg_is_ga, r);
+		kom_sprintf_lite(s, "\tXM:Z:%s", xm);
+		free(xm);
+	}
 }
 
 void mb_fmt_paf(kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, const mb_hit_t *p, uint64_t opt_flag, int n_seg, int seg_idx)
@@ -392,7 +408,8 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 	if (n_seg > 2) kom_sprintf_lite(s, "\tFI:i:%d", seg_idx);
 	if (r) {
 		write_tags(s, r);
-		if (opt->flag & MB_F_METH) write_meth_tags(s, l2b, t, n_seg, seg_idx, r);
+		if ((opt->flag & MB_F_METH) && opt->meth_tags)
+			write_meth_tags(s, l2b, t, n_seg, seg_idx, r, opt->meth_tags);
 		// MC:Z mate CIGAR and MQ:i mate MAPQ; r_next is the mate's primary (see above).
 		if (n_seg > 1 && r_next && r_next->p && r_next->p->n_cigar > 0 && mate_qlen > 0) {
 			kom_sprintf_lite(s, "\tMC:Z:");

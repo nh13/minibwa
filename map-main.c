@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <errno.h>
 #include <zlib.h>
 #include "kommon.h"
@@ -387,6 +388,7 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
+	{ "meth-tags",    ko_required_argument, 322 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -410,6 +412,8 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -b STR           output a base alignment tag: cs, ds or MD []\n");
 	fprintf(fp, "    --hic            map Hi-C reads; equivalent to option -5P\n");
 	fprintf(fp, "    --meth           map *directional* bisulfite sequencing reads\n");
+	fprintf(fp, "    --meth-tags=STR  with --meth, emit these tags: all, none, a list like XR,XG,\n");
+	fprintf(fp, "                     or ^ then a list to exclude, e.g. ^XM [all]\n");
 	fprintf(fp, "  Mapping:\n");
 	fprintf(fp, "    -k INT           min seed length [%d]\n", opt->min_len);
 	fprintf(fp, "    -c NUM           max seed occurrences [%d]\n", opt->max_occ);
@@ -460,6 +464,64 @@ static inline void yes_or_no(mb_opt_t *opt, uint64_t flag, int long_idx, const c
 		else if (strcmp(arg, "no") == 0 || strcmp(arg, "n") == 0) opt->flag |= flag;
 		else fprintf(stderr, "[WARNING]\033[1;31m option '--%s' only accepts 'yes' or 'no'.\033[0m\n", long_options[long_idx].name);
 	}
+}
+
+// Case-insensitive whole-string comparison; 1 if equal.
+static int str_ieq(const char *a, const char *b)
+{
+	for (; *a && *b; ++a, ++b)
+		if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+	return *a == 0 && *b == 0;
+}
+
+// Map one --meth-tags name to its MB_METH_TAG_* bit; 0 if it is not a tag name.
+static int32_t meth_tag_bit(const char *name, size_t len)
+{
+	if (len != 2 || (name[0] != 'X' && name[0] != 'x')) return 0;
+	if (name[1] == 'R' || name[1] == 'r') return MB_METH_TAG_XR;
+	if (name[1] == 'G' || name[1] == 'g') return MB_METH_TAG_XG;
+	if (name[1] == 'M' || name[1] == 'm') return MB_METH_TAG_XM;
+	return 0;
+}
+
+/* Parse a --meth-tags spec into an MB_METH_TAG_* mask, or -1 if malformed.
+ *
+ * Accepted: "all", "none", a comma-separated inclusion list of tag names, or a
+ * single leading '^' followed by a comma-separated exclusion list. Names are
+ * case-insensitive, and a list is a set: order and repetition do not matter.
+ * "all" and "none" are whole-spec keywords, not list members.
+ *
+ * The two list forms cannot be mixed. "XR,^XM" has no obvious reading -- "only
+ * XR" or "everything but XM"? -- so it is rejected instead of resolved
+ * arbitrarily. A '^' anywhere but the first character makes its token fail
+ * meth_tag_bit(), which is what enforces this.
+ *
+ * The separator is a comma and never whitespace, so a spec is always a single
+ * argv entry; a space-separated form would let the option swallow the next
+ * argument, which on this command line is a FASTQ. */
+static int32_t parse_meth_tags(const char *spec)
+{
+	int is_excl = (*spec == '^');
+	const char *p = is_excl? spec + 1 : spec;
+	int32_t mask = 0;
+
+	if (!is_excl) {
+		if (str_ieq(p, "all")) return MB_METH_TAG_ALL;
+		if (str_ieq(p, "none")) return 0;
+	}
+	if (*p == 0) return -1; // an empty spec or a bare "^"
+	while (*p) {
+		const char *q = p;
+		int32_t bit;
+		while (*q != 0 && *q != ',') ++q;
+		bit = meth_tag_bit(p, (size_t)(q - p));
+		if (bit == 0) return -1; // an empty, unknown or '^'-prefixed token
+		mask |= bit;
+		if (*q == 0) break;
+		p = q + 1;
+		if (*p == 0) return -1; // a trailing comma
+	}
+	return is_excl? (MB_METH_TAG_ALL & ~mask) : mask;
 }
 
 static void set_ins_size(mb_opt_t *opt, const char *arg)
@@ -553,6 +615,14 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
+		} else if (c == 322) { // --meth-tags
+			int32_t tags = parse_meth_tags(o.arg);
+			if (tags < 0) {
+				fprintf(stderr, "[ERROR] malformed --meth-tags spec '%s'; expected 'all', 'none', "
+						"a comma-separated list of XR/XG/XM, or '^' followed by such a list\n", o.arg);
+				return 1;
+			}
+			mo.meth_tags = tags;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor

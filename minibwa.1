@@ -159,6 +159,58 @@ bisulfite sequencing (BS-seq) data. Require an index built with
 In this mode, an unmethylated C on read 1 is expected to be converted to T and
 an unmethylated G on read 2 converted to A. Minibwa does not support
 undirectional BS-seq.
+In the SAM output, each alignment carries the Bismark
+.BR XR:Z ,
+.B XG:Z
+and
+.B XM:Z
+tags; see
+.BR --meth-tags .
+.TP
+.BR --meth-tags = \fISTR
+With
+.BR --meth ,
+select which of the three Bismark tags to emit [all].
+.I STR
+is
+.BR all ,
+.BR none ,
+a comma-separated list of tag names to emit, or
+.B ^
+followed by such a list of tag names to omit \(em for example
+.B XR,XG
+and
+.B ^XM
+both mean "emit XR and XG". Tag names are case-insensitive, and the list is a
+set: order and repetition do not matter. The two list forms cannot be combined:
+.B XR,^XM
+is an error rather than a guess between "only XR" and "everything but XM". The
+separator is a comma and never a space. A malformed
+.I STR
+is an error; minibwa never falls back to the default.
+.IP
+.B XM
+is the reason this option exists. It is a per-base call string as long as the
+read, so it dominates the size of the methylation output, while
+.B XR
+and
+.B XG
+are two-character constants. Dropping it is the difference between an alignment
+file that carries per-base calls and one that does not; it does not change the
+alignments themselves, and it costs no mapping time either way.
+The default is
+.B all
+because the tags are cheap to keep and expensive to miss: consumers in the
+Bismark family, such as
+.BR bismark_methylation_extractor ,
+methylKit, methtuple, DMRfinder and epialleleR, read
+.B XM
+as an input contract and cannot rebuild it from the alignment, so silently
+dropping it yields wrong methylation calls. Downstream tools that recompute the
+methylation context from the reference FASTA never read
+.B XM
+and can safely ask for
+.BR ^XM .
 
 .SS Mapping Options
 .TP 10

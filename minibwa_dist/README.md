@@ -194,6 +194,28 @@ re-stamps the final version.
 | `distro-reconcile.yml` | weekly Mon 07:31 UTC | correct stale statuses, PR the manifest, nominate unsubmitted work |
 | `distro-test.yml` | push/PR | ruff + the test suite |
 
+### Workflow changes are always one cycle behind
+
+The bot runs the version of itself that is on the **default branch** — `dist` — not the version
+on `ops/distro`. GitHub resolves `schedule` and `workflow_dispatch` against the default branch
+only. So a change to any `distro-*.yml` does **not** take effect when you push it to
+`ops/distro`; it takes effect after the sync that carries it onto `dist` has been shipped.
+
+The practical consequence: **you fix a workflow using the old workflow.** Push the change, let a
+sync run (still the old code), ship that PR, and the *next* run uses the new code. Expect the
+first run after a workflow change to behave the old way, and do not treat that as the fix having
+failed.
+
+The sharper consequence: **a broken workflow cannot repair itself.** If a change lands on `dist`
+that breaks `distro-sync`, no future sync can replace it, because syncing is the thing that is
+broken. The recovery is to assemble and publish `dist` by hand — the bootstrap sequence — which
+is the same reason the first `dist` had to be built manually.
+
+Two habits follow. Keep `distro-test.yml` passing on `ops/distro` before shipping, since it runs
+on push there and is the only check that sees a workflow change before `dist` does. And when a
+workflow change is risky, ship it on its own rather than bundled with feature changes, so a
+manual recovery has a small diff to reason about.
+
 `dist` is advanced in exactly one place — `distro-ship`, on a labelled PR, after the gates passed.
 Nothing else writes it.
 

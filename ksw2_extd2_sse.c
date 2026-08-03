@@ -13,6 +13,58 @@
 #error "Missing SSE2 or NEON intrinsics"
 #endif
 
+/* s2n-lite.h has no _mm_shuffle_epi8; carry it here until this ships.
+ * NEON's vqtbl1q_u8 returns 0 for any index >= 16, while SSSE3's _mm_shuffle_epi8
+ * returns 0 only when bit 7 is set -- they agree on [0,15] and on [128,255] and
+ * disagree on [16,127]. Every index built below is <= 12, so this is exact here.
+ * It is NOT a general _mm_shuffle_epi8. */
+#if defined(__ARM_NEON)
+static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return vqtbl1q_u8(a, b); }
+static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return veorq_u8(a, b); }
+#else
+static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return _mm_shuffle_epi8(a, b); }
+static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return _mm_xor_si128(a, b); }
+#endif
+
+/* {prev[15], cur[0..14]} -- the one-lane-right shift of `cur` carrying in the last
+ * byte of `prev`. NEON and SSSE3 each spell this in a single instruction; the SSE2
+ * fallback is the stock three-op form, which computes the same bytes because only
+ * prev[15] survives the srli. */
+static inline __m128i mbsb_alignr15(__m128i cur, __m128i prev)
+{
+#if defined(__ARM_NEON)
+	return vextq_u8(prev, cur, 15);
+#elif defined(__SSSE3__) || defined(__SSE4_1__)
+	return _mm_alignr_epi8(cur, prev, 15);
+#else
+	return _mm_or_si128(_mm_slli_si128(cur, 1), _mm_srli_si128(prev, 15));
+#endif
+}
+
+/* Sign-extend 8 int8 into two int32 vectors. One vector-domain load and one
+ * i8->i16 step shared by both halves; the i16->i32 step is left for the compiler
+ * to fuse into the accumulate (clang emits `saddw`/`saddw2`). */
+static inline void mbsb_widen_i8x16_pair(const int8_t *p, __m128i *w)
+{
+#if defined(__ARM_NEON)
+	int8x16_t b = vld1q_s8(p);
+	int16x8_t lo = vmovl_s8(vget_low_s8(b)), hi = vmovl_s8(vget_high_s8(b));
+	w[0] = vreinterpretq_u8_s32(vmovl_s16(vget_low_s16(lo)));
+	w[1] = vreinterpretq_u8_s32(vmovl_s16(vget_high_s16(lo)));
+	w[2] = vreinterpretq_u8_s32(vmovl_s16(vget_low_s16(hi)));
+	w[3] = vreinterpretq_u8_s32(vmovl_s16(vget_high_s16(hi)));
+#elif defined(__SSE4_1__)
+	__m128i b = _mm_loadu_si128((const __m128i*)p);
+	w[0] = _mm_cvtepi8_epi32(b);
+	w[1] = _mm_cvtepi8_epi32(_mm_srli_si128(b,  4));
+	w[2] = _mm_cvtepi8_epi32(_mm_srli_si128(b,  8));
+	w[3] = _mm_cvtepi8_epi32(_mm_srli_si128(b, 12));
+#else
+	int k;
+	for (k = 0; k < 4; ++k) w[k] = ksw_i8x4_to_i32x4(p + k * 4);
+#endif
+}
+
 static inline __m128i ksw_i8x4_to_i32x4(const int8_t *x)
 {
 #if defined(__ARM_NEON)
@@ -27,22 +79,22 @@ static inline __m128i ksw_i8x4_to_i32x4(const int8_t *x)
 void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uint8_t *target, int8_t m, const int8_t *mat,
 				   int8_t q, int8_t e, int8_t q2, int8_t e2, int w, int zdrop, int end_bonus, int flag, ksw_extz_t *ez)
 {
+/* x1_, v1_ and x21_ now carry the PREVIOUS rail vector, not its last byte, so the
+ * shift-shift-or collapses to one alignr per rail. `tmp` is reused as the holder
+ * so no new locals are needed and the diff stays inside this macro. */
 #define __dp_code_block1 \
 	z = _mm_load_si128(&s[t]); \
-	xt1 = _mm_load_si128(&x[t]);                     /* xt1 <- x[r-1][t..t+15] */ \
-	tmp = _mm_srli_si128(xt1, 15);                   /* tmp <- x[r-1][t+15] */ \
-	xt1 = _mm_or_si128(_mm_slli_si128(xt1, 1), x1_); /* xt1 <- x[r-1][t-1..t+14] */ \
+	tmp = _mm_load_si128(&x[t]);                     /* tmp <- x[r-1][t..t+15] */ \
+	xt1 = mbsb_alignr15(tmp, x1_);                   /* xt1 <- x[r-1][t-1..t+14] */ \
 	x1_ = tmp; \
-	vt1 = _mm_load_si128(&v[t]);                     /* vt1 <- v[r-1][t..t+15] */ \
-	tmp = _mm_srli_si128(vt1, 15);                   /* tmp <- v[r-1][t+15] */ \
-	vt1 = _mm_or_si128(_mm_slli_si128(vt1, 1), v1_); /* vt1 <- v[r-1][t-1..t+14] */ \
+	tmp = _mm_load_si128(&v[t]);                     /* tmp <- v[r-1][t..t+15] */ \
+	vt1 = mbsb_alignr15(tmp, v1_);                   /* vt1 <- v[r-1][t-1..t+14] */ \
 	v1_ = tmp; \
 	a = _mm_add_epi8(xt1, vt1);                      /* a <- x[r-1][t-1..t+14] + v[r-1][t-1..t+14] */ \
 	ut = _mm_load_si128(&u[t]);                      /* ut <- u[t..t+15] */ \
 	b = _mm_add_epi8(_mm_load_si128(&y[t]), ut);     /* b <- y[r-1][t..t+15] + u[r-1][t..t+15] */ \
-	x2t1= _mm_load_si128(&x2[t]); \
-	tmp = _mm_srli_si128(x2t1, 15); \
-	x2t1= _mm_or_si128(_mm_slli_si128(x2t1, 1), x21_); \
+	tmp = _mm_load_si128(&x2[t]); \
+	x2t1= mbsb_alignr15(tmp, x21_); \
 	x21_= tmp; \
 	a2= _mm_add_epi8(x2t1, vt1); \
 	b2= _mm_add_epi8(_mm_load_si128(&y2[t]), ut);
@@ -61,7 +113,10 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 	int with_cigar = !(flag&KSW_EZ_SCORE_ONLY), approx_max = !!(flag&KSW_EZ_APPROX_MAX);
 	int32_t *H = 0, H0 = 0, last_H0_t = 0;
 	uint8_t *qr, *sf, *mem, *mem2 = 0;
-	__m128i q_, q2_, qe_, qe2_, zero_, sc_mch_, sc_mis_, m1_, sc_N_;
+	/* sc_mis_, m1_ and sc_N_ are gone: the LUT is now the only consumer of the
+	 * mismatch, wildcard and N scores, and it holds them as table entries. */
+	__m128i q_, q2_, qe_, qe2_, zero_, sc_mch_, pmat_;
+	int use_lut;
 	__m128i *u, *v, *x, *y, *x2, *y2, *s, *p = 0;
 
 	ksw_reset_extz(ez);
@@ -75,9 +130,18 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 	qe_     = _mm_set1_epi8(q + e);
 	qe2_    = _mm_set1_epi8(q2 + e2);
 	sc_mch_ = _mm_set1_epi8(mat[0]);
-	sc_mis_ = _mm_set1_epi8(mat[1]);
-	sc_N_   = mat[m*m-1] == 0? _mm_set1_epi8(-e2) : _mm_set1_epi8(mat[m*m-1]);
-	m1_     = _mm_set1_epi8(m - 1); // wildcard
+	/* XOR-indexed substitution LUT, built once per call. Only the symmetric path
+	 * uses it; KSW_EZ_GENERIC_SC keeps the scalar mat[] lookup below. */
+	use_lut = !(flag & KSW_EZ_GENERIC_SC);
+	if (use_lut) {
+		int8_t pmat[16];
+		int8_t w_N = mat[m*m-1] == 0? (int8_t)-e2 : mat[m*m-1];
+		int lt;
+		pmat[0] = mat[0];                                  /* match            */
+		pmat[1] = pmat[2] = pmat[3] = mat[1];              /* ACGT mismatch    */
+		for (lt = 4; lt < 16; ++lt) pmat[lt] = w_N;        /* anything with N  */
+		pmat_ = _mm_loadu_si128((const __m128i*)pmat);
+	} else pmat_ = zero_;
 
 	if (w < 0) w = tlen > qlen? tlen : qlen;
 	wl = wr = w;
@@ -117,7 +181,16 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 		off_end = off + qlen + tlen - 1;
 	}
 
-	for (t = 0; t < qlen; ++t) qr[t] = query[qlen - 1 - t];
+	if (use_lut) {
+		/* query-N -> 8, which keeps every sf ^ qrr index <= 12. Confined to the
+		 * prepass: qr[] has no other reader. */
+		for (t = 0; t < qlen; ++t) {
+			uint8_t c = query[qlen - 1 - t];
+			qr[t] = c == m - 1? 8 : c;
+		}
+	} else {
+		for (t = 0; t < qlen; ++t) qr[t] = query[qlen - 1 - t];
+	}
 	memcpy(sf, target, tlen);
 
 	for (r = 0, last_st = last_en = -1; r < qlen + tlen - 1; ++r) {
@@ -154,30 +227,25 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 			u8[r] = r == 0? -q - e : r < long_thres? -e : r == long_thres? long_diff : -e2;
 		}
 		// loop fission: set scores first
-		if (!(flag & KSW_EZ_GENERIC_SC)) {
+		if (use_lut) {
+			/* 5 ops -> 2: one XOR, one byte shuffle. */
 			for (t = st0; t <= en0; t += 16) {
-				__m128i sq, st, tmp, mask;
+				__m128i sq, st;
 				sq = _mm_loadu_si128((__m128i*)&sf[t]);
 				st = _mm_loadu_si128((__m128i*)&qrr[t]);
-				mask = _mm_or_si128(_mm_cmpeq_epi8(sq, m1_), _mm_cmpeq_epi8(st, m1_));
-				tmp = _mm_cmpeq_epi8(sq, st);
-#ifdef __SSE4_1__
-				tmp = _mm_blendv_epi8(sc_mis_, sc_mch_, tmp);
-				tmp = _mm_blendv_epi8(tmp,     sc_N_,   mask);
-#else
-				tmp = _mm_or_si128(_mm_andnot_si128(tmp,  sc_mis_), _mm_and_si128(tmp,  sc_mch_));
-				tmp = _mm_or_si128(_mm_andnot_si128(mask, tmp),     _mm_and_si128(mask, sc_N_));
-#endif
-				_mm_storeu_si128((__m128i*)((int8_t*)s + t), tmp);
+				_mm_storeu_si128((__m128i*)((int8_t*)s + t),
+								 mbsb_shuffle_epi8(pmat_, mbsb_xor_si128(sq, st)));
 			}
 		} else {
 			for (t = st0; t <= en0; ++t)
 				((uint8_t*)s)[t] = mat[sf[t] * m + qrr[t]];
 		}
 		// core loop
-		x1_  = _mm_cvtsi32_si128((uint8_t)x1);
-		x21_ = _mm_cvtsi32_si128((uint8_t)x21);
-		v1_  = _mm_cvtsi32_si128((uint8_t)v1);
+		/* lane 15, not lane 0: mbsb_alignr15 reads the carry from the TOP byte of
+		 * the previous vector, so the row's boundary scalar has to sit there. */
+		x1_  = _mm_slli_si128(_mm_cvtsi32_si128((uint8_t)x1),  15);
+		x21_ = _mm_slli_si128(_mm_cvtsi32_si128((uint8_t)x21), 15);
+		v1_  = _mm_slli_si128(_mm_cvtsi32_si128((uint8_t)v1),  15);
 		st_ = st / 16, en_ = en / 16;
 		assert(en_ - st_ + 1 <= n_col_);
 		if (!with_cigar) { // score only
@@ -323,22 +391,47 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 				max_H_ = _mm_set1_epi32(max_H);
 				max_t_ = _mm_set1_epi32(max_t);
 				t_ = _mm_set1_epi32(st0);
-				for (t = st0; t < en1; t += 4) { // this implements: H[t]+=v8[t]-qe; if(H[t]>max_H) max_H=H[t],max_t=t;
-					__m128i H1, tmp, v_;
-					H1 = _mm_loadu_si128((__m128i*)&H[t]);
-					v_ = ksw_i8x4_to_i32x4(&v8[t]);
-					H1 = _mm_add_epi32(H1, v_);
-					_mm_storeu_si128((__m128i*)&H[t], H1);
-					tmp = _mm_cmpgt_epi32(H1, max_H_);
+				/* One accumulator update, spelled exactly as the stock loop does.
+				 * The four-lane accumulator and the ORDER of the updates are what
+				 * make max_t reproducible -- lane j keeps the earliest strict
+				 * maximum among t = st0+j, st0+4+j, ..., and the epilogue takes the
+				 * lowest lane index that is strictly greater, so the winner is NOT
+				 * "the smallest t achieving the max". Only the widening changes. */
+#define __mbsb_hmax_step(HT, W) do { \
+					__m128i H1 = _mm_loadu_si128((__m128i*)(HT)), msk; \
+					H1 = _mm_add_epi32(H1, (W)); \
+					_mm_storeu_si128((__m128i*)(HT), H1); \
+					msk = _mm_cmpgt_epi32(H1, max_H_); \
+					_mbsb_hmax_sel(H1, msk); \
+					t_ = _mm_add_epi32(t_, t4_); \
+				} while (0)
 #ifdef __SSE4_1__
-					max_H_ = _mm_max_epi32(max_H_, H1);
-					max_t_ = _mm_blendv_epi8(max_t_, t_, tmp);
+#define _mbsb_hmax_sel(H1, msk) do { \
+					max_H_ = _mm_max_epi32(max_H_, (H1)); \
+					max_t_ = _mm_blendv_epi8(max_t_, t_, (msk)); \
+				} while (0)
 #else
-					max_H_ = _mm_or_si128(_mm_and_si128(tmp, H1), _mm_andnot_si128(tmp, max_H_));
-					max_t_ = _mm_or_si128(_mm_and_si128(tmp, t_), _mm_andnot_si128(tmp, max_t_));
+#define _mbsb_hmax_sel(H1, msk) do { \
+					max_H_ = _mm_or_si128(_mm_and_si128((msk), (H1)), _mm_andnot_si128((msk), max_H_)); \
+					max_t_ = _mm_or_si128(_mm_and_si128((msk), t_), _mm_andnot_si128((msk), max_t_)); \
+				} while (0)
 #endif
-					t_ = _mm_add_epi32(t_, t4_);
+				{
+					int en16 = st0 + (en0 - st0) / 16 * 16;
+					for (t = st0; t < en16; t += 16) {
+						__m128i w[4];
+						mbsb_widen_i8x16_pair(&v8[t], w);
+						__mbsb_hmax_step(&H[t],      w[0]);
+						__mbsb_hmax_step(&H[t +  4], w[1]);
+						__mbsb_hmax_step(&H[t +  8], w[2]);
+						__mbsb_hmax_step(&H[t + 12], w[3]);
+					}
 				}
+				for (; t < en1; t += 4) { // this implements: H[t]+=v8[t]-qe; if(H[t]>max_H) max_H=H[t],max_t=t;
+					__mbsb_hmax_step(&H[t], ksw_i8x4_to_i32x4(&v8[t]));
+				}
+#undef __mbsb_hmax_step
+#undef _mbsb_hmax_sel
 				_mm_storeu_si128((__m128i*)HH, max_H_);
 				_mm_storeu_si128((__m128i*)tt, max_t_);
 				for (i = 0; i < 4; ++i)

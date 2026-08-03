@@ -28,6 +28,14 @@ summary = "reassociate the affine-gap recurrence in ksw2_ll for arm64"
 upstream = { pr = 37, status = "rejected" }
 
 [[feature]]
+name = "ksw2-extension-kernels"
+branch = "perf/ksw2-extension-kernels"
+required = false
+output = "identical"
+summary = "shuffle-LUT prepass, one-vext rail shift and 16-wide exact-max in ksw2_extd2/extz2"
+upstream = { status = "unsubmitted" }
+
+[[feature]]
 name = "single-copy-parser"
 branch = "feat/single-copy-parser"
 required = false

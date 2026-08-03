@@ -41,6 +41,30 @@ static inline __m128i mbsb_alignr15(__m128i cur, __m128i prev)
 #endif
 }
 
+/* Sign-extend 8 int8 into two int32 vectors. One vector-domain load and one
+ * i8->i16 step shared by both halves; the i16->i32 step is left for the compiler
+ * to fuse into the accumulate (clang emits `saddw`/`saddw2`). */
+static inline void mbsb_widen_i8x16_pair(const int8_t *p, __m128i *w)
+{
+#if defined(__ARM_NEON)
+	int8x16_t b = vld1q_s8(p);
+	int16x8_t lo = vmovl_s8(vget_low_s8(b)), hi = vmovl_s8(vget_high_s8(b));
+	w[0] = vreinterpretq_u8_s32(vmovl_s16(vget_low_s16(lo)));
+	w[1] = vreinterpretq_u8_s32(vmovl_s16(vget_high_s16(lo)));
+	w[2] = vreinterpretq_u8_s32(vmovl_s16(vget_low_s16(hi)));
+	w[3] = vreinterpretq_u8_s32(vmovl_s16(vget_high_s16(hi)));
+#elif defined(__SSE4_1__)
+	__m128i b = _mm_loadu_si128((const __m128i*)p);
+	w[0] = _mm_cvtepi8_epi32(b);
+	w[1] = _mm_cvtepi8_epi32(_mm_srli_si128(b,  4));
+	w[2] = _mm_cvtepi8_epi32(_mm_srli_si128(b,  8));
+	w[3] = _mm_cvtepi8_epi32(_mm_srli_si128(b, 12));
+#else
+	int k;
+	for (k = 0; k < 4; ++k) w[k] = ksw_i8x4_to_i32x4(p + k * 4);
+#endif
+}
+
 static inline __m128i ksw_i8x4_to_i32x4(const int8_t *x)
 {
 #if defined(__ARM_NEON)
@@ -367,22 +391,47 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 				max_H_ = _mm_set1_epi32(max_H);
 				max_t_ = _mm_set1_epi32(max_t);
 				t_ = _mm_set1_epi32(st0);
-				for (t = st0; t < en1; t += 4) { // this implements: H[t]+=v8[t]-qe; if(H[t]>max_H) max_H=H[t],max_t=t;
-					__m128i H1, tmp, v_;
-					H1 = _mm_loadu_si128((__m128i*)&H[t]);
-					v_ = ksw_i8x4_to_i32x4(&v8[t]);
-					H1 = _mm_add_epi32(H1, v_);
-					_mm_storeu_si128((__m128i*)&H[t], H1);
-					tmp = _mm_cmpgt_epi32(H1, max_H_);
+				/* One accumulator update, spelled exactly as the stock loop does.
+				 * The four-lane accumulator and the ORDER of the updates are what
+				 * make max_t reproducible -- lane j keeps the earliest strict
+				 * maximum among t = st0+j, st0+4+j, ..., and the epilogue takes the
+				 * lowest lane index that is strictly greater, so the winner is NOT
+				 * "the smallest t achieving the max". Only the widening changes. */
+#define __mbsb_hmax_step(HT, W) do { \
+					__m128i H1 = _mm_loadu_si128((__m128i*)(HT)), msk; \
+					H1 = _mm_add_epi32(H1, (W)); \
+					_mm_storeu_si128((__m128i*)(HT), H1); \
+					msk = _mm_cmpgt_epi32(H1, max_H_); \
+					_mbsb_hmax_sel(H1, msk); \
+					t_ = _mm_add_epi32(t_, t4_); \
+				} while (0)
 #ifdef __SSE4_1__
-					max_H_ = _mm_max_epi32(max_H_, H1);
-					max_t_ = _mm_blendv_epi8(max_t_, t_, tmp);
+#define _mbsb_hmax_sel(H1, msk) do { \
+					max_H_ = _mm_max_epi32(max_H_, (H1)); \
+					max_t_ = _mm_blendv_epi8(max_t_, t_, (msk)); \
+				} while (0)
 #else
-					max_H_ = _mm_or_si128(_mm_and_si128(tmp, H1), _mm_andnot_si128(tmp, max_H_));
-					max_t_ = _mm_or_si128(_mm_and_si128(tmp, t_), _mm_andnot_si128(tmp, max_t_));
+#define _mbsb_hmax_sel(H1, msk) do { \
+					max_H_ = _mm_or_si128(_mm_and_si128((msk), (H1)), _mm_andnot_si128((msk), max_H_)); \
+					max_t_ = _mm_or_si128(_mm_and_si128((msk), t_), _mm_andnot_si128((msk), max_t_)); \
+				} while (0)
 #endif
-					t_ = _mm_add_epi32(t_, t4_);
+				{
+					int en16 = st0 + (en0 - st0) / 16 * 16;
+					for (t = st0; t < en16; t += 16) {
+						__m128i w[4];
+						mbsb_widen_i8x16_pair(&v8[t], w);
+						__mbsb_hmax_step(&H[t],      w[0]);
+						__mbsb_hmax_step(&H[t +  4], w[1]);
+						__mbsb_hmax_step(&H[t +  8], w[2]);
+						__mbsb_hmax_step(&H[t + 12], w[3]);
+					}
 				}
+				for (; t < en1; t += 4) { // this implements: H[t]+=v8[t]-qe; if(H[t]>max_H) max_H=H[t],max_t=t;
+					__mbsb_hmax_step(&H[t], ksw_i8x4_to_i32x4(&v8[t]));
+				}
+#undef __mbsb_hmax_step
+#undef _mbsb_hmax_sel
 				_mm_storeu_si128((__m128i*)HH, max_H_);
 				_mm_storeu_si128((__m128i*)tt, max_t_);
 				for (i = 0; i < 4; ++i)

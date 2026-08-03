@@ -25,3 +25,5 @@ jobs:
       - run: make -j$(nproc || sysctl -n hw.ncpu) -C api-test
       - name: meth XR/XG/XM tag test
         run: sh test/test-meth-tags.sh
+      - name: meth --meth-tags selection test
+        run: sh test/test-meth-tag-select.sh

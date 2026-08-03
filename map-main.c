@@ -75,7 +75,7 @@ static void worker_for_se_batch(void *data, long i, int tid)
 		}
 	}
 	assert(p == n);
-	mb_seed_intv_batch(km, idx->bwt, n, len, seq, opt->min_len, opt->max_sub_occ, sai);
+	mb_seed_intv_batch(km, idx->bwt, n, len, seq, opt->min_len, opt->max_sub_occ, opt->min_sub_occ, sai);
 	kfree(km, seq);
 	kfree(km, len);
 	kfree(km, buf);
@@ -388,6 +388,8 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
+	{ "max-sub-occ",  ko_required_argument, 316 }, // ablation: 0 disables Pass-2 sub-SMEM reseeding
+	{ "min-sub-occ",  ko_required_argument, 317 }, // ablation: skip Pass-2 for SMEMs with SA-interval size < N (default 1)
 	{ "meth-tags",    ko_required_argument, 322 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
@@ -424,6 +426,8 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -p FLOAT         min secondary-to-primary score ratio [%g]\n", opt->pri_ratio);
 	fprintf(fp, "    -N INT           retain at most INT secondary alignments [%d]\n", opt->best_n);
 	fprintf(fp, "    --chain-only     perform chaining only without base alignment\n");
+	fprintf(fp, "    --max-sub-occ=INT  reseed Pass-2 sub-SMEMs only when SA-interval size <= INT (0 disables Pass-2) [%d]\n", opt->max_sub_occ);
+	fprintf(fp, "    --min-sub-occ=INT  skip Pass-2 reseeding when SA-interval size < INT [%d]\n", opt->min_sub_occ);
 	fprintf(fp, "    -x STR           preset (sr, lr or adap for mixed short/long reads) [adap]\n");
 	fprintf(fp, "  Alignment:\n");
 	fprintf(fp, "    -A INT           matching score [%d]\n", opt->a);
@@ -628,6 +632,10 @@ int main_map(int argc, char *argv[])
 				return 1;
 			}
 			mo.meth_tags = tags;
+		} else if (c == 316) { // --max-sub-occ
+			mo.max_sub_occ = atoi(o.arg);
+		} else if (c == 317) { // --min-sub-occ
+			mo.min_sub_occ = atoi(o.arg);
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -666,6 +674,10 @@ int main_map(int argc, char *argv[])
 		} else if (c == 902) { // --help
 			return usage_map(stdout, &mo);
 		}
+	}
+	if (mo.max_sub_occ > 0 && mo.min_sub_occ > mo.max_sub_occ) {
+		fprintf(stderr, "[ERROR] --min-sub-occ (%d) must not exceed --max-sub-occ (%d)\n", mo.min_sub_occ, mo.max_sub_occ);
+		return 1;
 	}
 	if (argc - o.ind < 2)
 		return usage_map(stderr, &mo);

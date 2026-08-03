@@ -220,9 +220,16 @@ jobs:
         run: |
           # Stable title, deduped the same way -- a wedged build should not
           # file a fresh issue every night it stays broken.
-          TITLE="sync: build failed"
+          # Do not name a specific step: `if: failure()` fires for ANY failed step,
+          # so "build failed" was wrong whenever the gates or the PR step were the
+          # ones that broke. The run link is what identifies the actual step.
+          TITLE="sync: run failed"
           gh issue list --state open --search "$TITLE in:title" --json number \
             --jq '.[0].number // empty' | grep -q . && exit 0
           SHA=$(git rev-parse --short master 2>/dev/null || echo unknown)
           gh issue create --title "$TITLE" \
-            --body "distro-sync failed for upstream \`${SHA}\`. \`dist\` is unchanged. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --body "distro-sync failed while assembling against upstream \`${SHA}\`. \`dist\` is unchanged -- it is only ever advanced by distro-ship on a labelled PR.
+
+          The failing step is named in the run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          This issue is deduped by title, so it will not refile while it stays open."

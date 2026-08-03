@@ -10,19 +10,19 @@ all:$(EXE)
 	(cd ..; make libminibwa.a)
 
 mbmap-one:ex-one.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm
+	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 mbmap-batch:ex-batch.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm
+	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 ex-lift-check:ex-lift-check.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm
+	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 ex-place-check:ex-place-check.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm
+	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 ex-group-check:ex-group-check.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm
+	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 clean:
 	rm -f $(EXE)

@@ -26,6 +26,21 @@ static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return _mm_shuff
 static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return _mm_xor_si128(a, b); }
 #endif
 
+/* {prev[15], cur[0..14]} -- the one-lane-right shift of `cur` carrying in the last
+ * byte of `prev`. NEON and SSSE3 each spell this in a single instruction; the SSE2
+ * fallback is the stock three-op form, which computes the same bytes because only
+ * prev[15] survives the srli. */
+static inline __m128i mbsb_alignr15(__m128i cur, __m128i prev)
+{
+#if defined(__ARM_NEON)
+	return vextq_u8(prev, cur, 15);
+#elif defined(__SSSE3__) || defined(__SSE4_1__)
+	return _mm_alignr_epi8(cur, prev, 15);
+#else
+	return _mm_or_si128(_mm_slli_si128(cur, 1), _mm_srli_si128(prev, 15));
+#endif
+}
+
 static inline __m128i ksw_i8x4_to_i32x4(const int8_t *x)
 {
 #if defined(__ARM_NEON)
@@ -40,22 +55,22 @@ static inline __m128i ksw_i8x4_to_i32x4(const int8_t *x)
 void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uint8_t *target, int8_t m, const int8_t *mat,
 				   int8_t q, int8_t e, int8_t q2, int8_t e2, int w, int zdrop, int end_bonus, int flag, ksw_extz_t *ez)
 {
+/* x1_, v1_ and x21_ now carry the PREVIOUS rail vector, not its last byte, so the
+ * shift-shift-or collapses to one alignr per rail. `tmp` is reused as the holder
+ * so no new locals are needed and the diff stays inside this macro. */
 #define __dp_code_block1 \
 	z = _mm_load_si128(&s[t]); \
-	xt1 = _mm_load_si128(&x[t]);                     /* xt1 <- x[r-1][t..t+15] */ \
-	tmp = _mm_srli_si128(xt1, 15);                   /* tmp <- x[r-1][t+15] */ \
-	xt1 = _mm_or_si128(_mm_slli_si128(xt1, 1), x1_); /* xt1 <- x[r-1][t-1..t+14] */ \
+	tmp = _mm_load_si128(&x[t]);                     /* tmp <- x[r-1][t..t+15] */ \
+	xt1 = mbsb_alignr15(tmp, x1_);                   /* xt1 <- x[r-1][t-1..t+14] */ \
 	x1_ = tmp; \
-	vt1 = _mm_load_si128(&v[t]);                     /* vt1 <- v[r-1][t..t+15] */ \
-	tmp = _mm_srli_si128(vt1, 15);                   /* tmp <- v[r-1][t+15] */ \
-	vt1 = _mm_or_si128(_mm_slli_si128(vt1, 1), v1_); /* vt1 <- v[r-1][t-1..t+14] */ \
+	tmp = _mm_load_si128(&v[t]);                     /* tmp <- v[r-1][t..t+15] */ \
+	vt1 = mbsb_alignr15(tmp, v1_);                   /* vt1 <- v[r-1][t-1..t+14] */ \
 	v1_ = tmp; \
 	a = _mm_add_epi8(xt1, vt1);                      /* a <- x[r-1][t-1..t+14] + v[r-1][t-1..t+14] */ \
 	ut = _mm_load_si128(&u[t]);                      /* ut <- u[t..t+15] */ \
 	b = _mm_add_epi8(_mm_load_si128(&y[t]), ut);     /* b <- y[r-1][t..t+15] + u[r-1][t..t+15] */ \
-	x2t1= _mm_load_si128(&x2[t]); \
-	tmp = _mm_srli_si128(x2t1, 15); \
-	x2t1= _mm_or_si128(_mm_slli_si128(x2t1, 1), x21_); \
+	tmp = _mm_load_si128(&x2[t]); \
+	x2t1= mbsb_alignr15(tmp, x21_); \
 	x21_= tmp; \
 	a2= _mm_add_epi8(x2t1, vt1); \
 	b2= _mm_add_epi8(_mm_load_si128(&y2[t]), ut);
@@ -202,9 +217,11 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 				((uint8_t*)s)[t] = mat[sf[t] * m + qrr[t]];
 		}
 		// core loop
-		x1_  = _mm_cvtsi32_si128((uint8_t)x1);
-		x21_ = _mm_cvtsi32_si128((uint8_t)x21);
-		v1_  = _mm_cvtsi32_si128((uint8_t)v1);
+		/* lane 15, not lane 0: mbsb_alignr15 reads the carry from the TOP byte of
+		 * the previous vector, so the row's boundary scalar has to sit there. */
+		x1_  = _mm_slli_si128(_mm_cvtsi32_si128((uint8_t)x1),  15);
+		x21_ = _mm_slli_si128(_mm_cvtsi32_si128((uint8_t)x21), 15);
+		v1_  = _mm_slli_si128(_mm_cvtsi32_si128((uint8_t)v1),  15);
 		st_ = st / 16, en_ = en / 16;
 		assert(en_ - st_ + 1 <= n_col_);
 		if (!with_cigar) { // score only

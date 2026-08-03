@@ -455,6 +455,22 @@ def test_the_workflows_do_not_hand_parse_the_manifest() -> None:
     )
 
 
+def test_the_nochange_guard_ignores_only_derived_artifacts() -> None:
+    """A no-op sync must not open a PR.
+
+    MB_VERSION embeds the assembly sha and dist-manifest.json records it, so both
+    differ on every rebuild. If the "nothing to ship" check compared raw trees it
+    could never fire and the bot would file a PR every day, which is how a review
+    channel stops being read. Assert the guard excludes exactly those two and
+    nothing else -- excluding minibwa.h wholesale would hide real feature changes.
+    """
+    script = _run(_sync(), "assemble", "Re-parent dist-next onto dist")
+    assert "dist-manifest.json" in script
+    assert "#define MB_VERSION" in script
+    assert "':!minibwa.h'" not in script, "excluding minibwa.h wholesale would hide feature changes"
+    assert "nochange=1" in script
+
+
 def test_the_test_workflow_pins_its_python_tooling() -> None:
     """Every `uses:` in these workflows is pinned to a SHA; an unpinned linter
     is the same class of "CI turns red for something that is not the change".

@@ -162,11 +162,20 @@ jobs:
             exit 0
           fi
           TREE=$(git rev-parse dist-next^{tree})
-          if [ "$TREE" = "$(git rev-parse origin/dist^{tree})" ]; then
-            echo "assembled tree is identical to dist; nothing to ship"
+          # "Nothing changed" has to ignore the two DERIVED artifacts, or it can
+          # never fire: MB_VERSION embeds the assembly sha and dist-manifest.json
+          # records it, so both differ on every rebuild even when no feature and
+          # no upstream commit moved. Without this the bot opens a no-op PR daily,
+          # which is how a notification channel stops being read.
+          SUBSTANTIVE=$(git diff origin/dist dist-next -- . ':!dist-manifest.json' \
+                        | grep -E '^[+-][^+-]' \
+                        | grep -vcE '^[+-]#define MB_VERSION ' || true)
+          if [ "${SUBSTANTIVE:-0}" -eq 0 ]; then
+            echo "no substantive change since dist; nothing to ship"
             echo "nochange=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "$SUBSTANTIVE substantive changed line(s) since dist"
           UPSTREAM_SHA=$(git rev-parse --short master)
           NEW=$(git commit-tree "$TREE" -p origin/dist \
                   -m "sync: assemble ${{ steps.assemble.outputs.version }} on upstream ${UPSTREAM_SHA}")

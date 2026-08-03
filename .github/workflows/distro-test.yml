@@ -1,0 +1,38 @@
+name: distro-test
+
+on:
+  push:
+    branches: [ops/distro]
+  pull_request:
+    branches: [ops/distro, dist]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Configure git for the synthetic-repo fixtures
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name  "Test"
+          git config --global init.defaultBranch master
+      # Pinned for the same reason every `uses:` above is pinned to a SHA: a
+      # ruff or pytest release between two runs can change what `ruff check`
+      # accepts or how tests are collected, turning this job red for a reason
+      # that has nothing to do with the change under test.
+      - run: pipx install ruff==0.16.1
+      - run: pip install pytest==9.1.1
+      - run: ruff check minibwa_dist/
+      - run: ruff format --check minibwa_dist/
+      - run: python -m pytest minibwa_dist/tests -v

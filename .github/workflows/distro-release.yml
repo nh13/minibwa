@@ -1,0 +1,156 @@
+name: distro-release
+
+# Mirror an upstream release. Invoked manually with the upstream tag after
+# distro-sync has shipped the matching `dist`.
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream tag to mirror, e.g. v0.6"
+        required: true
+      revision:
+        description: "Downstream revision counter"
+        required: true
+        default: "1"
+
+permissions:
+  contents: write
+
+# `gh` prefers a remote named `upstream` over `origin` when both are present,
+# and this job adds exactly that remote below to verify the tag lineage. The
+# read-only `gh release view --repo lh3/minibwa` call keeps its explicit
+# `--repo`, which wins over this env var; every other `gh` call in this
+# workflow needs the pin so it targets this fork, not lh3/minibwa.
+env:
+  GH_REPO: ${{ github.repository }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # workflow_dispatch inputs are attacker-controllable text (anyone who can
+    # trigger the workflow chooses them) and this job holds contents: write --
+    # never splice `${{ inputs.* }}` straight into a run: script. Hoist both to
+    # job-level env once here and use "$TAG"/"$REV" everywhere below.
+    env:
+      TAG: ${{ inputs.upstream_tag }}
+      REV: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: dist
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate the dispatch inputs
+        # These are attacker-controllable text and reach `git tag`, a version
+        # string and a filename below. Constrain them here, once, rather than
+        # relying on whatever each downstream tool happens to reject.
+        run: |
+          case "$REV" in ''|*[!0-9]*)
+            echo "revision must be a positive integer, got '$REV'" >&2; exit 1;;
+          esac
+          case "$TAG" in ''|*[!A-Za-z0-9._-]*)
+            echo "upstream_tag may only contain [A-Za-z0-9._-], got '$TAG'" >&2; exit 1;;
+          esac
+
+      - name: Confirm dist was assembled from this exact upstream tag
+        # `git merge-base --is-ancestor "$TAG" HEAD` used to stand here, and it
+        # passes for precisely the case its own comment claimed to prevent:
+        # `dist` is reassembled nightly from upstream master tip, so any dist
+        # built after v0.6 still contains v0.6 and the guard waves it through.
+        # Ancestry cannot answer this question at all. The assembly records the
+        # commit it merged the features onto, so compare that: equal means this
+        # tree really is the tag plus the manifest, and nothing else.
+        run: |
+          git fetch --force origin '+refs/heads/*:refs/remotes/origin/*'
+          # `gh` prefers a remote named `upstream` over `origin` when resolving
+          # the base repo -- this remote's presence is exactly why the
+          # workflow-level GH_REPO pin above is required, not optional.
+          git remote add upstream https://github.com/lh3/minibwa.git 2>/dev/null || true
+          git fetch --force --tags upstream
+          test -f dist-manifest.json || { echo "dist-manifest.json missing from dist" >&2; exit 1; }
+          BASE=$(jq -r '.base // empty' dist-manifest.json)
+          [ -n "$BASE" ] || { echo "dist-manifest.json records no assembly base" >&2; exit 1; }
+          TAG_SHA=$(git rev-parse "${TAG}^{commit}")
+          [ "$BASE" = "$TAG_SHA" ] || {
+            echo "dist was assembled from ${BASE}, not ${TAG} (${TAG_SHA})" >&2
+            echo "re-run distro-sync with master at ${TAG} before releasing" >&2
+            exit 1
+          }
+
+      - name: Stamp the version
+        # The rewrite lives in `minibwa_dist.cli stamp`, which `stamp_dev_version`
+        # also uses -- this step used to carry a second copy as a sed
+        # expression with looser matching, no existence check, and a
+        # replacement into which `&` or `/` from $VERSION would have been
+        # spliced as sed syntax.
+        run: |
+          VERSION="${TAG#v}-nh13.${REV}"
+          # MB_VERSION is a single #define at minibwa.h:6 and flows into the SAM
+          # @PG VN: tag, so this one line self-identifies every output file.
+          # distro-sync already stamped a `.dev+<sha>` value here; this replaces it.
+          python -m minibwa_dist.cli stamp --repo . --version "$VERSION"
+          grep -qF "MB_VERSION \"${VERSION}\"" minibwa.h
+          git config user.name  "minibwa-distro-bot"
+          git config user.email "noreply@github.com"
+          git add -- minibwa.h
+          git -c commit.gpgsign=false commit -m "release: minibwa ${VERSION}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build, gate and verify BEFORE tagging
+        # Nothing is published until this passes: a tag pointing at an unverified
+        # commit is worse than no release.
+        #
+        # Gate with the tooling and manifest `dist` itself carries, not with
+        # origin/ops/distro's tip. `ops-distro` is a required = true feature that
+        # merges first, so every assembled dist already has minibwa_dist/ -- and
+        # ops/distro keeps moving between syncs (the reconcile bot commits to
+        # it), so overlaying its tip made the gate and the rendered feature table
+        # describe a manifest this tag does not contain. The overlay used to be
+        # undone at the end of the notes step by `git checkout -- minibwa_dist
+        # pyproject.toml`, which restores from the index the overlay had already
+        # overwritten: a no-op that read as protection.
+        run: |
+          make -j"$(nproc)"
+          make -j"$(nproc)" -C api-test
+          ./minibwa version | grep -Fx "${VERSION}"
+          git worktree add /tmp/stock "$TAG"
+          make -C /tmp/stock -j"$(nproc)"
+          python -m minibwa_dist.cli gates \
+            --candidate ./minibwa --stock /tmp/stock/minibwa \
+            --fixtures ./test --workdir /tmp/gates \
+            --assembly dist-manifest.json
+
+      - name: Render release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" --repo lh3/minibwa \
+            --json body --jq .body > /tmp/upstream-notes.md
+          # The job checked out ref: dist, and distro-sync commits
+          # dist-manifest.json onto dist-next (which ships into dist), so read
+          # it from the local tree instead of round-tripping through the API.
+          # Its presence was already asserted by the lineage guard above.
+          DROPPED=$(jq -r '[.dropped[].name] | join(" ")' dist-manifest.json)
+          python -m minibwa_dist.cli notes \
+            --upstream-notes /tmp/upstream-notes.md \
+            --upstream-tag "$TAG" \
+            ${DROPPED:+--dropped $DROPPED} > /tmp/notes.md
+
+      - name: Tag and push
+        run: |
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: minibwa ${{ env.VERSION }}
+          body_path: /tmp/notes.md

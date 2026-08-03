@@ -1,0 +1,61 @@
+name: distro-ship
+
+# `dist` is rewindable and is advanced ONLY here, only after distro-sync's gates
+# passed and a human added the `ship` label.
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Belt and braces: this workflow never adds an `upstream` remote today, but `gh`
+# prefers a remote named `upstream` over `origin` when both are present, and
+# this job is one added remote away from filing its PR comment against
+# lh3/minibwa instead of this fork. Pin explicitly rather than rely on absence.
+env:
+  GH_REPO: ${{ github.repository }}
+
+defaults:
+  run:
+    shell: bash
+
+# A second labelling while one ship run is still in flight must not race it onto
+# `dist` -- serialize, never cancel a push already in progress.
+concurrency:
+  group: distro-ship
+  cancel-in-progress: false
+
+jobs:
+  ship:
+    # The head-repo and base-ref checks matter: without them, a PR from a fork
+    # whose head branch is literally named `dist-next`, or one opened against
+    # some other base, satisfies the label condition alone.
+    if: >-
+      github.event.label.name == 'ship' &&
+      github.event.pull_request.head.ref == 'dist-next' &&
+      github.event.pull_request.base.ref == 'dist' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Force-update dist
+        # Pin to the exact commit the PR was labelled on, not whatever
+        # dist-next happens to point at by the time this job runs -- a sync
+        # started after labelling would otherwise force-push a tree nobody
+        # reviewed.
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git push --force origin "${HEAD_SHA}:refs/heads/dist"
+      - name: Close the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "\`dist\` force-updated to \`${HEAD_SHA:0:7}\`."
+          gh pr close "${{ github.event.pull_request.number }}"

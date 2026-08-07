@@ -23,7 +23,6 @@
 | `smem-search-memtraffic` | — | unsubmitted | identical | prefetch occ in the k-mer-cache path; -4.4% of SMEM time |
 | `inline-appenders` | [lh3/minibwa#32](https://github.com/lh3/minibwa/pull/32) | rejected | identical | format SAM/PAF records with inline appenders; +0.4-1.2% wall |
 | `parallel-encode` | [lh3/minibwa#33](https://github.com/lh3/minibwa/pull/33) | open | identical | format SAM/PAF in the mapping step instead of the output thread |
-| `pe-encode-vectorize` | — | unsubmitted | identical | split paired-end query encoding so the revcomp auto-vectorizes |
 | `meth-cleanups` | [lh3/minibwa#19](https://github.com/lh3/minibwa/pull/19) | rejected | identical | a --meth CI test; documents the mb_align1_inv strand flip and b_ts (comments only) |
 | `meth-sam-tags` | [lh3/minibwa#15](https://github.com/lh3/minibwa/pull/15) | open | conditional | emit Bismark-compatible XR/XG/XM tags |
 | `soft-clip-penalty` | [lh3/minibwa#13](https://github.com/lh3/minibwa/pull/13) | rejected | conditional | 5'/3' soft-clip penalty (-L) |

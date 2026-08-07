@@ -40,7 +40,12 @@ name = "single-copy-parser"
 branch = "feat/single-copy-parser"
 required = false
 output = "identical"
-summary = "read FASTQ records with a single copy instead of two"
+# Unlike the two coordinator-side features further down, this one eliminates a copy
+# rather than moving it to another thread, so it genuinely reduces total work and its
+# ladder increment (0.67-1.24 pp) sits inside what returning that CPU to the mapping
+# threads can buy (<= 0.85 pp at 16 threads). Not implicated in their batch-count
+# artifact -- though it has not itself been confirmed at production scale either.
+summary = "read FASTQ records with a single copy instead of two; 0.67-1.24 pp whole-stack ladder increment"
 upstream = { status = "unsubmitted" }
 
 [[feature]]
@@ -73,12 +78,25 @@ summary = "prefetch occ in the k-mer-cache path; -0.9 to -1.7 pp whole-stack on 
 upstream = { status = "unsubmitted" }
 
 # --- shared-file features ---
+# The two features below are coordinator-side, and their ladder increments are an
+# artifact of the ladder's input size. Both were measured on `wgs-1M`, which is only
+# four mini-batches at the default -K 100m, and a coordinator-side change can reach
+# the wall clock ONLY through pipeline starvation -- the fill and drain during which
+# no mapping is in flight. That is an O(1) cost: measured at 8.0% of the parallel
+# budget with 2 batches, 4.55% with 4, and a fixed ~0.9 thread-s beyond ~60.
+#
+# Confirmed on c8g.4xlarge at -t 16, rung 7 vs rung 9, rep spread 0.02-0.20%:
+#   2 batches +3.66pp | 4 (default) +3.72pp | 7 +2.30pp | 13 +1.13pp
+#   31 +0.04pp | 61 -0.06pp | and wgs-5M at the default -K, 15 batches, +1.09pp
+# So the gain is gone above ~31 batches ~= 3.1 Gbp ~= 10M pairs, which every
+# production WGS input exceeds. Quote the dependence, not a bare percentage.
+# See ephemeral/finding--ladder-batch-count.md.
 [[feature]]
 name = "inline-appenders"
 branch = "feat/inline-appenders"
 required = false
 output = "identical"
-summary = "format SAM/PAF records with inline appenders; +0.4-1.2% wall"
+summary = "format SAM/PAF records with inline appenders; with parallel-encode worth +3.7 pp at the default -K on wgs-1M but ~0 above ~10M pairs (input-size dependent, see notes)"
 upstream = { pr = 32, status = "rejected" }
 
 [[feature]]
@@ -86,7 +104,10 @@ name = "parallel-encode"
 branch = "feat/parallel-encode"
 required = false
 output = "identical"
-summary = "format SAM/PAF in the mapping step instead of the output thread"
+# Relocates work rather than removing it -- total process CPU is unchanged (medians
+# 102.9-104.4 s either way) -- so it can only pay while the coordinator is on the
+# critical path. Hence the batch-count dependence documented above.
+summary = "format SAM/PAF in the mapping step instead of the output thread; relocates work rather than removing it, so it pays only on inputs small enough to be starvation-bound"
 upstream = { pr = 33, status = "open" }
 
 [[feature]]

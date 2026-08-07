@@ -32,8 +32,8 @@ name = "ksw2-extension-kernels"
 branch = "perf/ksw2-extension-kernels"
 required = false
 output = "identical"
-summary = "shuffle-LUT prepass, one-vext rail shift and 16-wide exact-max in ksw2_extd2/extz2"
-upstream = { status = "unsubmitted" }
+summary = "shuffle-LUT prepass, one-vext rail shift, 16-wide exact-max and NEON BIT direction bytes in ksw2_extd2/extz2; +11% HiFi and +10% ONT on arm64, +7% on x86"
+upstream = { pr = 64, status = "open" }
 
 [[feature]]
 name = "single-copy-parser"

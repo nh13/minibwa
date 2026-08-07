@@ -32,15 +32,20 @@ name = "ksw2-extension-kernels"
 branch = "perf/ksw2-extension-kernels"
 required = false
 output = "identical"
-summary = "shuffle-LUT prepass, one-vext rail shift and 16-wide exact-max in ksw2_extd2/extz2"
-upstream = { status = "unsubmitted" }
+summary = "shuffle-LUT prepass, one-vext rail shift, 16-wide exact-max and NEON BIT direction bytes in ksw2_extd2/extz2; +11% HiFi and +10% ONT on arm64, +7% on x86"
+upstream = { pr = 64, status = "open" }
 
 [[feature]]
 name = "single-copy-parser"
 branch = "feat/single-copy-parser"
 required = false
 output = "identical"
-summary = "read FASTQ records with a single copy instead of two"
+# Unlike the two coordinator-side features further down, this one eliminates a copy
+# rather than moving it to another thread, so it genuinely reduces total work and its
+# ladder increment (0.67-1.24 pp) sits inside what returning that CPU to the mapping
+# threads can buy (<= 0.85 pp at 16 threads). Not implicated in their batch-count
+# artifact -- though it has not itself been confirmed at production scale either.
+summary = "read FASTQ records with a single copy instead of two; 0.67-1.24 pp whole-stack ladder increment"
 upstream = { status = "unsubmitted" }
 
 [[feature]]
@@ -64,16 +69,34 @@ name = "smem-search-memtraffic"
 branch = "perf/smem-search-memtraffic"
 required = false
 output = "identical"
-summary = "prefetch occ in the k-mer-cache path; -4.4% of SMEM time"
+# The summary used to quote "-4.4% of SMEM time". That number has no artifact
+# behind it -- it was recalled from a session transcript, the harness it cited
+# does not exist in the tree, and the commit's own message says -10.4%. What IS
+# reproducible is the whole-stack ladder increment, so quote that instead and
+# say which measurement it is.
+summary = "prefetch occ in the k-mer-cache path; -0.9 to -1.7 pp whole-stack on c8g/c6a, flat on gcc 12"
 upstream = { status = "unsubmitted" }
 
 # --- shared-file features ---
+# The two features below are coordinator-side, and their ladder increments are an
+# artifact of the ladder's input size. Both were measured on `wgs-1M`, which is only
+# four mini-batches at the default -K 100m, and a coordinator-side change can reach
+# the wall clock ONLY through pipeline starvation -- the fill and drain during which
+# no mapping is in flight. That is an O(1) cost: measured at 8.0% of the parallel
+# budget with 2 batches, 4.55% with 4, and a fixed ~0.9 thread-s beyond ~60.
+#
+# Confirmed on c8g.4xlarge at -t 16, rung 7 vs rung 9, rep spread 0.02-0.20%:
+#   2 batches +3.66pp | 4 (default) +3.72pp | 7 +2.30pp | 13 +1.13pp
+#   31 +0.04pp | 61 -0.06pp | and wgs-5M at the default -K, 15 batches, +1.09pp
+# So the gain is gone above ~31 batches ~= 3.1 Gbp ~= 10M pairs, which every
+# production WGS input exceeds. Quote the dependence, not a bare percentage.
+# See ephemeral/finding--ladder-batch-count.md.
 [[feature]]
 name = "inline-appenders"
 branch = "feat/inline-appenders"
 required = false
 output = "identical"
-summary = "format SAM/PAF records with inline appenders; +0.4-1.2% wall"
+summary = "format SAM/PAF records with inline appenders; with parallel-encode worth +3.7 pp at the default -K on wgs-1M but ~0 above ~10M pairs (input-size dependent, see notes)"
 upstream = { pr = 32, status = "rejected" }
 
 [[feature]]
@@ -81,16 +104,11 @@ name = "parallel-encode"
 branch = "feat/parallel-encode"
 required = false
 output = "identical"
-summary = "format SAM/PAF in the mapping step instead of the output thread"
+# Relocates work rather than removing it -- total process CPU is unchanged (medians
+# 102.9-104.4 s either way) -- so it can only pay while the coordinator is on the
+# critical path. Hence the batch-count dependence documented above.
+summary = "format SAM/PAF in the mapping step instead of the output thread; relocates work rather than removing it, so it pays only on inputs small enough to be starvation-bound"
 upstream = { pr = 33, status = "open" }
-
-[[feature]]
-name = "pe-encode-vectorize"
-branch = "perf/pe-encode-vectorize"
-required = false
-output = "identical"
-summary = "split paired-end query encoding so the revcomp auto-vectorizes"
-upstream = { status = "unsubmitted" }
 
 [[feature]]
 name = "meth-cleanups"
@@ -161,3 +179,14 @@ summary = """Large speedups (-5.5% WGS, -44.9% Hi-C) but every ablation level mo
 placements on real data (WGS L4: 1 in 4,300 at MAPQ>=10). The simulated ROC that passed was the \
 wrong experiment. The Hi-C result survives as a different idea: skip rescue when the insert-size \
 distribution is uninformative."""
+
+[[withdrawn]]
+name = "pe-encode-vectorize"
+branch = "perf/pe-encode-vectorize"
+report = "reports/2026-08-06-pe-encode-vectorize-x86-regression.md"
+summary = """Flat on arm64 and a reproducible cost on x86 (+0.34pp gcc t=5.3, +0.54pp clang \
+t=11.3), standalone rather than an adjacency artifact. The premise holds -- the revcomp does \
+auto-vectorize, identically on both architectures -- but the split makes loop 2 reload with \
+16-byte vector loads what scalar loop 1 just wrote byte-by-byte, which defeats x86 \
+store-to-load forwarding. Moot regardless: the nt4 encode is absent from a profile, under 0.1% \
+of runtime, so nothing here was worth optimizing."""

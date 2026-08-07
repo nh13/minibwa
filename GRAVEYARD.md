@@ -23,3 +23,10 @@ AUC flat at -2.6e-5 and strictly dominated by raising the mapQ threshold: unpatc
 
 Large speedups (-5.5% WGS, -44.9% Hi-C) but every ablation level moves confident placements on real data (WGS L4: 1 in 4,300 at MAPQ>=10). The simulated ROC that passed was the wrong experiment. The Hi-C result survives as a different idea: skip rescue when the insert-size distribution is uninformative.
 
+## `pe-encode-vectorize`
+
+- **Branch:** `perf/pe-encode-vectorize`
+- **Report:** `reports/2026-08-06-pe-encode-vectorize-x86-regression.md`
+
+Flat on arm64 and a reproducible cost on x86 (+0.34pp gcc t=5.3, +0.54pp clang t=11.3), standalone rather than an adjacency artifact. The premise holds -- the revcomp does auto-vectorize, identically on both architectures -- but the split makes loop 2 reload with 16-byte vector loads what scalar loop 1 just wrote byte-by-byte, which defeats x86 store-to-load forwarding. Moot regardless: the nt4 encode is absent from a profile, under 0.1% of runtime, so nothing here was worth optimizing.
+

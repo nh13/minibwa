@@ -16,14 +16,13 @@
 |---|---|---|---|---|
 | `ops-distro` | — | unsubmitted | identical | distribution manifest, assembly engine and workflows |
 | `ll-affine-reassoc` | [lh3/minibwa#37](https://github.com/lh3/minibwa/pull/37) | rejected | identical | reassociate the affine-gap recurrence in ksw2_ll for arm64 |
-| `ksw2-extension-kernels` | — | unsubmitted | identical | shuffle-LUT prepass, one-vext rail shift and 16-wide exact-max in ksw2_extd2/extz2 |
-| `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two |
+| `ksw2-extension-kernels` | [lh3/minibwa#64](https://github.com/lh3/minibwa/pull/64) | open | identical | shuffle-LUT prepass, one-vext rail shift, 16-wide exact-max and NEON BIT direction bytes in ksw2_extd2/extz2; +11% HiFi and +10% ONT on arm64, +7% on x86 |
+| `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two; 0.67-1.24 pp whole-stack ladder increment |
 | `index-threads-v2` | — | unsubmitted | identical | parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe) |
 | `extd2-avx512` | [lh3/minibwa#20](https://github.com/lh3/minibwa/pull/20) | open | identical | AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT |
-| `smem-search-memtraffic` | — | unsubmitted | identical | prefetch occ in the k-mer-cache path; -4.4% of SMEM time |
-| `inline-appenders` | [lh3/minibwa#32](https://github.com/lh3/minibwa/pull/32) | rejected | identical | format SAM/PAF records with inline appenders; +0.4-1.2% wall |
-| `parallel-encode` | [lh3/minibwa#33](https://github.com/lh3/minibwa/pull/33) | open | identical | format SAM/PAF in the mapping step instead of the output thread |
-| `pe-encode-vectorize` | — | unsubmitted | identical | split paired-end query encoding so the revcomp auto-vectorizes |
+| `smem-search-memtraffic` | — | unsubmitted | identical | prefetch occ in the k-mer-cache path; -0.9 to -1.7 pp whole-stack on c8g/c6a, flat on gcc 12 |
+| `inline-appenders` | [lh3/minibwa#32](https://github.com/lh3/minibwa/pull/32) | rejected | identical | format SAM/PAF records with inline appenders; with parallel-encode worth +3.7 pp at the default -K on wgs-1M but ~0 above ~10M pairs (input-size dependent, see notes) |
+| `parallel-encode` | [lh3/minibwa#33](https://github.com/lh3/minibwa/pull/33) | open | identical | format SAM/PAF in the mapping step instead of the output thread; relocates work rather than removing it, so it pays only on inputs small enough to be starvation-bound |
 | `meth-cleanups` | [lh3/minibwa#19](https://github.com/lh3/minibwa/pull/19) | rejected | identical | a --meth CI test; documents the mb_align1_inv strand flip and b_ts (comments only) |
 | `meth-sam-tags` | [lh3/minibwa#15](https://github.com/lh3/minibwa/pull/15) | open | conditional | emit Bismark-compatible XR/XG/XM tags |
 | `soft-clip-penalty` | [lh3/minibwa#13](https://github.com/lh3/minibwa/pull/13) | rejected | conditional | 5'/3' soft-clip penalty (-L) |

@@ -410,9 +410,13 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 				 * (twin-exclusion) makes the pair look unpaired, so mate rescue re-runs and
 				 * re-discovers an already-present ALT hit -- without this guard that
 				 * yields two identical secondary SAM records.  An identical-coordinate
-				 * duplicate carries no new information, so dropping it is safe for the
-				 * non-ALT path too. */
-				{
+				 * duplicate carries no new information, so dropping it would be safe
+				 * on the non-ALT path too -- but "safe" is not "byte-identical", and
+				 * the manifest promises byte-identity without a .alt.  The duplicate
+				 * only arises from twin-exclusion, which is an ALT mechanism, so gate
+				 * on ALT being involved and leave the baseline path untouched.  If
+				 * this is worth having generally it belongs upstream on its own. */
+				if (mb_any_alt(h1->n, h1->a) || ht.is_alt) {
 					int32_t e; int dup = 0;
 					for (e = 0; e < h1->n; ++e) {
 						const mb_hit_t *he = &h1->a[e];
@@ -475,14 +479,9 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	for (r = 0; r < 2; ++r) {
 		ha[r].n = ha[r].m = n_hit[r];
 		ha[r].a = hit[r];
-		// Split the nt4 translation from the reverse-complement: the table lookup is a gather
-		// the compiler can't vectorize, and fusing it kept the revcomp scalar too. As two loops
-		// the revcomp auto-vectorizes (~1.4x faster on the encode), while the translation is
-		// unchanged.
-		for (i = 0; i < qlen[r]; ++i)
-			qs[r][0][i] = kom_nt4_table[(uint8_t)qseq[r][i]];
 		for (i = 0; i < qlen[r]; ++i) {
-			int32_t c = qs[r][0][i];
+			int32_t c = kom_nt4_table[(uint8_t)qseq[r][i]];
+			qs[r][0][i] = c;
 			qs[r][1][qlen[r] - 1 - i] = c < 4? 3 - c : 4;
 		}
 	}
@@ -526,7 +525,7 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], mb_hit_t *hit[2], const mb_pestat_t pes[4], int32_t qlen[2], char *const qseq[2])
 {
 	const int32_t pe_bonus = 4;
-	int32_t r, i, dp_max_se[2], score_se, dp_max_se2[2], score_se2, do_matesw, is_meth = !!(opt->flag & MB_F_METH);
+	int32_t r, i, dp_max_se[2], score_se, dp_max_se2[2], score_se2, do_matesw, is_meth = !!(opt->flag & MB_F_METH), reset_sam_pri = 1;
 	mb_pairaux_t paux;
 	int32_t seed_ratio[2], min_seed_ratio;
 	int32_t pri_idx[2] = {-1, -1}; /* PE-pair-chosen primary endpoint per read; -1 => fall back to per-read order */
@@ -563,7 +562,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 			mb_pair_hits(km, opt, l2b, n_hit, hit, pes, &paux); // pair again if new hits rescued
 		}
 	}
-	if (paux.n_pp == 0) goto end_pairing;
+	if (paux.n_pp == 0) goto end_pairing; // skip the rest if there are no properly paired hits
 
 	for (r = 0; r < 2; ++r) {
 		for (dp_max_se[r] = dp_max_se2[r] = 0, i = 0; i < n_hit[r]; ++i) {
@@ -578,23 +577,24 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 
 	mb_sync_high_cov(n_hit[0], hit[0]);
 	mb_sync_high_cov(n_hit[1], hit[1]);
+	for (r = 0; r < 2; ++r) // clear 0x2 as these will be re-evaluated and set in the following
+		for (i = 0; i < n_hit[r]; ++i)
+			hit[r][i].proper_pair = 0;
+	mb_hit_t *h[2];
+	h[0] = &hit[0][paux.i[0]];
+	h[1] = &hit[1][paux.i[1]];
+	/* ALT liftover-group: twin-exclusion excludes non-representative ALT group members
+	 * (is_alt && parent != id) from pair enumeration, so a chosen pair endpoint
+	 * that is ALT must be its group's representative (parent == id).  Guards the
+	 * re-rooting at :563-569 from promoting an ALT subordinate to primary and
+	 * emitting the wrong sam_pri.  (Non-ALT subordinates may still legitimately be
+	 * pair endpoints -- the re-rooting block handles them as before.) */
+	assert(!h[0]->is_alt || h[0]->id == h[0]->parent);
+	assert(!h[1]->is_alt || h[1]->id == h[1]->parent);
 	if (paux.score >= score_se - opt->pen_unpair * opt->a) { // choose the paired hits
 		int32_t mapq_pe, score2 = paux.sub_sc, diff;
 		double identity;
-		mb_hit_t *h[2];
-		h[0] = &hit[0][paux.i[0]];
-		h[1] = &hit[1][paux.i[1]];
 		assert(n_hit[0] > 0 && n_hit[1] > 0);
-		/* ALT liftover-group: twin-exclusion excludes non-representative ALT group members
-		 * (is_alt && parent != id) from pair enumeration, so a chosen pair endpoint
-		 * that is ALT must be its group's representative (parent == id).  Guards the
-		 * re-rooting below from promoting an ALT subordinate to primary and
-		 * emitting the wrong sam_pri.  (Non-ALT subordinates may still legitimately be
-		 * pair endpoints -- the re-rooting block handles them as before.)
-		 * On feat/alt-aware-liftgroup these sat just above the `if`; upstream since
-		 * moved h[] into this block, and everything they guard is inside it. */
-		assert(!h[0]->is_alt || h[0]->id == h[0]->parent);
-		assert(!h[1]->is_alt || h[1]->id == h[1]->parent);
 		/* The pairing chose these endpoints (DP + insert-size consistency); the
 		 * re-rooting below makes each its group representative.  Record them so
 		 * mb_set_sam_pri emits the pair-chosen copy as the SAM primary instead of
@@ -627,12 +627,19 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 		 * The surviving single pair is then an arbitrary pick of one tied copy, so the
 		 * high pair-based mapq overstates confidence -- damp it to ~0 (bwa-mem stays
 		 * cautious here too).  Conditions (a)+(b) keep this off genuine recoveries,
-		 * where the mate fits exactly one copy.  Reuses already-computed fields.  This
-		 * only fires when ALT lifting has re-exposed the second co-optimal copy as a
-		 * representative, so it is a no-op without a .alt (byte-identical to baseline). */
+		 * where the mate fits exactly one copy.  Reuses already-computed fields.
+		 *
+		 * Gated on an ALT hit actually being present.  This block used to carry an
+		 * ARGUMENT that it was a no-op without a .alt rather than a check, and the
+		 * argument was wrong: two genuine paralogs both surviving as representatives
+		 * with dp_max within opt->a, plus a rescue tie, satisfies (a)-(c) with no ALT
+		 * anywhere.  Measured on 100k HG002 WGS pairs against an index with no .alt,
+		 * the SAM differed from stock.  The chrM fixture is too small to reach here,
+		 * so the distribution's byte-identity gate passed throughout. */
 		{	int rr;
 			for (rr = 0; rr < 2; ++rr) {
 				int32_t j, n_coopt = 0;
+				if (!mb_any_alt(n_hit[rr], hit[rr])) continue;
 				if (!h[!rr]->rescued || h[rr]->rescued || !rescue_tie[rr]) continue;
 				for (j = 0; j < n_hit[rr]; ++j) {
 					const mb_hit_t *hj = &hit[rr][j];
@@ -661,7 +668,8 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 			 * byte-identical (mb_any_alt is false => no behavior change). */
 			int r_any_alt = mb_any_alt(n_hit[r], hit[r]);
 			for (i = 0; i < n_hit[r]; ++i) { // handle other chimeric hits
-				mb_hit_t *p = &hit[r][i], *q = h[r];
+				const mb_hit_t *q = h[r];
+				mb_hit_t *p = &hit[r][i];
 				if (q != p && p->id == p->parent) { // p is a chimeric hit that is not h[r]
 					int32_t j, ol = p->qe <= q->qs || p->qs >= q->qe? 0 : (p->qe < q->qe? p->qe : q->qe) - (p->qs > q->qs? p->qs : q->qs);
 					/* cross-group guard (ALT liftover-group): the demotion below collapses `p`
@@ -683,7 +691,26 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 					}
 				}
 			}
+			for (i = 0; i < n_hit[r]; ++i) {
+				mb_hit_t *p = &hit[r][i];
+				p->sam_pri = p->proper_pair = 0;
+				if (p->id == p->parent)
+					p->proper_pair = 1;
+			}
+			h[r]->sam_pri = 1;
 		}
+		if (opt->flag & MB_F_PRIMARY5) {
+			int32_t pri[2];
+			/* -1: this block asks what the 5-prime rule alone would pick, so the
+			 * pair-chosen endpoint must not override it or the test below is vacuous. */
+			pri[0] = mb_set_sam_pri(n_hit[0], hit[0], 1, -1);
+			pri[1] = mb_set_sam_pri(n_hit[1], hit[1], 1, -1);
+			if (&hit[0][pri[0]] != h[0] || &hit[1][pri[1]] != h[1]) // if sam_pri is changed, clear flag 0x2
+				for (r = 0; r < 2; ++r)
+					for (i = 0; i < n_hit[r]; ++i)
+						hit[r][i].proper_pair = 0;
+		}
+		reset_sam_pri = 0;
 	} else { // choose the unpaired hits
 		int32_t diff = score_se - opt->pen_unpair * opt->a - paux.score;
 		int32_t mapq_pe = 6 * diff / opt->a;
@@ -692,6 +719,8 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 				hit[r][i].mapq = hit[r][i].mapq < mapq_pe? hit[r][i].mapq : mapq_pe;
 	}
 end_pairing:
-	mb_set_sam_pri(n_hit[0], hit[0], !!(opt->flag & MB_F_PRIMARY5), pri_idx[0]);
-	mb_set_sam_pri(n_hit[1], hit[1], !!(opt->flag & MB_F_PRIMARY5), pri_idx[1]);
+	if (reset_sam_pri) {
+		mb_set_sam_pri(n_hit[0], hit[0], !!(opt->flag & MB_F_PRIMARY5), pri_idx[0]);
+		mb_set_sam_pri(n_hit[1], hit[1], !!(opt->flag & MB_F_PRIMARY5), pri_idx[1]);
+	}
 }

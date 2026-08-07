@@ -13,23 +13,17 @@
 #error "Missing SSE2 or NEON intrinsics"
 #endif
 
-/* s2n-lite.h carries neither _mm_shuffle_epi8 nor _mm_xor_si128; carry them here
- * until this ships. NEON's vqtbl1q_u8 zeroes any index >= 16 while SSSE3's
- * _mm_shuffle_epi8 zeroes only when bit 7 is set -- exact here because every index
- * built below is <= 12, but NOT a general shuffle. */
+/* not a general _mm_shuffle_epi8: vqtbl1q_u8 zeroes any index >= 16 where SSSE3
+ * only zeroes on bit 7. Every index built below is <= 12, so the two agree. */
 #if defined(__ARM_NEON)
-static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return vqtbl1q_u8(a, b); }
-static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return veorq_u8(a, b); }
+static inline __m128i ksw_shuffle_epi8(__m128i a, __m128i b) { return vqtbl1q_u8(a, b); }
+static inline __m128i ksw_xor_si128(__m128i a, __m128i b) { return veorq_u8(a, b); }
 #else
-static inline __m128i mbsb_shuffle_epi8(__m128i a, __m128i b) { return _mm_shuffle_epi8(a, b); }
-static inline __m128i mbsb_xor_si128(__m128i a, __m128i b) { return _mm_xor_si128(a, b); }
+static inline __m128i ksw_shuffle_epi8(__m128i a, __m128i b) { return _mm_shuffle_epi8(a, b); }
+static inline __m128i ksw_xor_si128(__m128i a, __m128i b) { return _mm_xor_si128(a, b); }
 #endif
 
-
-/* {prev[15], cur[0..14]} -- one lane right, carrying in prev's last byte. NEON and
- * SSSE3 each spell this in one instruction; the SSE2 fallback is the stock
- * three-op form, which computes the same bytes because only prev[15] survives. */
-static inline __m128i mbsb_alignr15(__m128i cur, __m128i prev)
+static inline __m128i ksw_alignr15(__m128i cur, __m128i prev) /* {prev[15], cur[0..14]} */
 {
 #if defined(__ARM_NEON)
 	return vextq_u8(prev, cur, 15);
@@ -45,10 +39,10 @@ void ksw_extz2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 #define __dp_code_block1 \
 	z = _mm_load_si128(&s[t]);  /* s[] is pre-biased by (q+e)*2 in the prepass */ \
 	tmp = _mm_load_si128(&x[t]);                     /* tmp <- x[r-1][t..t+15] */ \
-	xt1 = mbsb_alignr15(tmp, x1_);                   /* xt1 <- x[r-1][t-1..t+14] */ \
+	xt1 = ksw_alignr15(tmp, x1_);                   /* xt1 <- x[r-1][t-1..t+14] */ \
 	x1_ = tmp; \
 	tmp = _mm_load_si128(&v[t]);                     /* tmp <- v[r-1][t..t+15] */ \
-	vt1 = mbsb_alignr15(tmp, v1_);                   /* vt1 <- v[r-1][t-1..t+14] */ \
+	vt1 = ksw_alignr15(tmp, v1_);                   /* vt1 <- v[r-1][t-1..t+14] */ \
 	v1_ = tmp; \
 	a = _mm_add_epi8(xt1, vt1);                      /* a <- x[r-1][t-1..t+14] + v[r-1][t-1..t+14] */ \
 	ut = _mm_load_si128(&u[t]);                      /* ut <- u[t..t+15] */ \
@@ -67,10 +61,6 @@ void ksw_extz2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 	int with_cigar = !(flag&KSW_EZ_SCORE_ONLY), approx_max = !!(flag&KSW_EZ_APPROX_MAX);
 	int32_t *H = 0, H0 = 0, last_H0_t = 0;
 	uint8_t *qr, *sf, *mem, *mem2 = 0;
-	/* Five constants die with this change: sc_mis_, sc_N_ and m1_ because the LUT
-	 * is now their only consumer and holds them as table entries; sc_mch_ because
-	 * extz2's DP clamps with max_sc_ rather than the raw match score; and qe2_
-	 * because the bias it carried is folded into the table (T2). */
 	__m128i q_, zero_, flag1_, flag2_, flag8_, flag16_, max_sc_, pmat_;
 	int use_lut;
 	__m128i *u, *v, *x, *y, *s, *p = 0;
@@ -85,7 +75,7 @@ void ksw_extz2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 	flag8_  = _mm_set1_epi8(0x08);
 	flag16_ = _mm_set1_epi8(0x10);
 	max_sc_ = _mm_set1_epi8(mat[0] + (q + e) * 2);
-	/* XOR-indexed substitution LUT, PRE-BIASED by (q+e)*2 so the DP's add vanishes. */
+	// XOR-indexed substitution LUT, pre-biased by (q+e)*2 so the DP add vanishes
 	use_lut = !(flag & KSW_EZ_GENERIC_SC);
 	if (use_lut) {
 		int8_t pmat[16], bias = (int8_t)((q + e) * 2);
@@ -163,7 +153,7 @@ void ksw_extz2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 				sq = _mm_loadu_si128((__m128i*)&sf[t]);
 				st = _mm_loadu_si128((__m128i*)&qrr[t]);
 				_mm_storeu_si128((__m128i*)((uint8_t*)s + t),
-								 mbsb_shuffle_epi8(pmat_, mbsb_xor_si128(sq, st)));
+								 ksw_shuffle_epi8(pmat_, ksw_xor_si128(sq, st)));
 			}
 		} else {
 			/* Not table-driven, so this path carries the bias itself. */
@@ -171,8 +161,7 @@ void ksw_extz2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 				((uint8_t*)s)[t] = mat[sf[t] * m + qrr[t]] + (uint8_t)((q + e) * 2);
 		}
 		// core loop
-		/* lane 15, not lane 0: mbsb_alignr15 takes the carry from the TOP byte
-		 * of the previous vector, so the row's boundary scalar has to sit there. */
+		// lane 15: ksw_alignr15() takes the carry from the top byte of the previous vector
 		x1_ = _mm_slli_si128(_mm_cvtsi32_si128(x1), 15);
 		v1_ = _mm_slli_si128(_mm_cvtsi32_si128(v1), 15);
 		st_ = st / 16, en_ = en / 16;

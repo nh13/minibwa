@@ -64,11 +64,6 @@ mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload)
 	mb_bwt_cache(bwt, 10); // TODO: don't hard code this
 	idx = kom_calloc(mb_idx_t, 1);
 	idx->is_meth = !!is_meth, idx->l2b = l2b, idx->bwt = bwt;
-	/* Auto-detect <prefix>.alt, exactly as mb_idx_load() does: lift[] is built on
-	 * the heap-allocated ctg[] and is independent of how the index was mapped, so
-	 * --mmap must not silently lose ALT awareness. */
-	strcat(strcpy(buf, prefix), ".alt");
-	l2b_set_alt(l2b, buf); /* returns -1 (ENOENT) if absent — ignore */
 end_idx_load_mmap:
 	free(buf);
 	return idx;
@@ -582,10 +577,10 @@ add_primary:
  * effectively arbitrary -- and was emitting a different copy than the mate-
  * consistent one the pairing chose).  Otherwise fall back to the 5'-most
  * (is_primary5) or the first representative. */
-void mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5, int32_t pref)
+int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5, int32_t pref)
 {
-	int32_t i, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
-	if (n <= 0) return;
+	int32_t i, new_pri, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
+	if (n <= 0) return -1;
 	for (i = 0; i < n; ++i) {
 		r[i].sam_pri = 0;
 		if (r[i].id != r[i].parent) continue;
@@ -594,10 +589,10 @@ void mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5, int32_t pref)
 			min_i = i, min_qs = r[i].qs;
 	}
 	assert(n_pri > 0);
-	if (pref >= 0 && pref < n && r[pref].id == r[pref].parent)
-		r[pref].sam_pri = 1;
-	else if (is_primary5) r[min_i].sam_pri = 1;
-	else r[first_i].sam_pri = 1;
+	if (pref >= 0 && pref < n && r[pref].id == r[pref].parent) new_pri = pref;
+	else new_pri = is_primary5? min_i : first_i;
+	r[new_pri].sam_pri = 1;
+	return new_pri;
 }
 
 /* Check whether hit r co-locates with any of the n_kept placements in kpl[].
@@ -1251,7 +1246,7 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 	kfree(km, seq4);
 
 	// paired-end processing
-	if (is_pe && n_seq >= 2) {
+	if (is_pe && n_seq >= 2 && !(opt->flag & (MB_F_NO_PAIRING|MB_F_NO_ALN))) {
 		mb_pestat_t pes[4];
 		for (i = 0; i < 4; ++i) pes[i].failed = 1;
 		pes[1].failed = 0;

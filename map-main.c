@@ -145,15 +145,15 @@ static void worker_for_format(void *data, long i, int tid)
 				mate_qlen = s->seq[mate_idx].l_seq;
 			}
 			if (s->n_hit[k] > 0) { // the query has at least one hit
-				int32_t n_sec = 0;
+				int32_t n_sec = 0, alt_rec;
 				for (j = 0; j < s->n_hit[k]; ++j) {
 					const mb_hit_t *h = &s->hit[k][j];
-					// --alt-records means "emit ALT-contig alignments": it widens
-					// the outer secondary gate AND exempts the record from the
-					// --outs score filter, which postdates the feature.
-					int32_t alt_force = (opt->flag & MB_F_ALT_RECORDS) && h->is_alt;
-					if (h->parent == h->id || n_sec < opt->out_n || alt_force) {
-						if (h->parent != h->id && !alt_force) {
+					/* --alt-records emits every ALT hit, so it also bypasses the
+					 * secondary score-ratio filter.  parallel-encode moved this
+					 * block out of worker_pipeline; the predicate moves with it. */
+					alt_rec = (opt->flag & MB_F_ALT_RECORDS) && h->is_alt;
+					if (h->parent == h->id || n_sec < opt->out_n || alt_rec) {
+						if (h->parent != h->id && !alt_rec) {
 							const mb_hit_t *p = &s->hit[k][h->parent];
 							if (p->p && h->p) {
 								if (h->p->dp_max < (double)opt->out_s * p->p->dp_max) continue;
@@ -241,7 +241,7 @@ static void *worker_pipeline(void *shared, int step, void *in)
     } else if (step == 1) { // step 1: map
 		step_t *s = (step_t*)in;
 		kt_for(opt->n_thread, worker_for_se_batch, in, s->n_sb);
-		if ((opt->flag & MB_F_PE) && s->n_frag < s->n_seq && !(opt->flag & MB_F_NO_PAIRING)) { // PE mode
+		if ((opt->flag & MB_F_PE) && s->n_frag < s->n_seq && !(opt->flag & (MB_F_NO_PAIRING|MB_F_NO_ALN))) { // PE mode
 			if ((opt->flag & MB_F_PE_PREDEF) || s->n_pe < 20) { // use predefined PE stats
 				s->pes[1].failed = 0;
 				s->pes[1].avg = opt->pe_avg, s->pes[1].std = opt->pe_std;
@@ -392,13 +392,13 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
-	{ "max-sub-occ",  ko_required_argument, 316 }, // ablation: 0 disables Pass-2 sub-SMEM reseeding
-	{ "min-sub-occ",  ko_required_argument, 317 }, // ablation: skip Pass-2 for SMEMs with SA-interval size < N (default 1)
-	{ "alt",          ko_required_argument, 318 },
-	{ "alt-records",  ko_no_argument,       319 },
-	{ "alt-lift-tol", ko_required_argument, 320 },
-	{ "pe-pair-primary", ko_optional_argument, 321 },
 	{ "meth-tags",    ko_required_argument, 322 },
+	{ "max-sub-occ",  ko_required_argument, 320 }, // ablation: 0 disables Pass-2 sub-SMEM reseeding
+	{ "min-sub-occ",  ko_required_argument, 321 }, // ablation: skip Pass-2 for SMEMs with SA-interval size < N (default 1)
+	{ "alt",          ko_required_argument, 316 },
+	{ "alt-records",  ko_no_argument,       317 },
+	{ "alt-lift-tol", ko_required_argument, 318 },
+	{ "pe-pair-primary", ko_optional_argument, 319 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -435,7 +435,7 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
     fprintf(fp, "    -m INT           min chaining score [%d]\n", opt->min_chain_score);
 	fprintf(fp, "    -p FLOAT         min secondary-to-primary score ratio [%g]\n", opt->pri_ratio);
 	fprintf(fp, "    -N INT           retain at most INT secondary alignments [%d]\n", opt->best_n);
-	fprintf(fp, "    --chain-only     perform chaining only without base alignment\n");
+	fprintf(fp, "    --chain-only     perform chaining only without base alignment; force -fP\n");
 	fprintf(fp, "    --max-sub-occ=INT  reseed Pass-2 sub-SMEMs only when SA-interval size <= INT (0 disables Pass-2) [%d]\n", opt->max_sub_occ);
 	fprintf(fp, "    --min-sub-occ=INT  skip Pass-2 reseeding when SA-interval size < INT [%d]\n", opt->min_sub_occ);
 	fprintf(fp, "    -x STR           preset (sr, lr or adap for mixed short/long reads) [adap]\n");
@@ -576,7 +576,7 @@ int main_map(int argc, char *argv[])
 			fprintf(stderr, "[ERROR] missing option argument\n");
 			return 1;
 		} else if (c == '?') {
-			fprintf(stderr, "[ERROR] unknown option in \"%s\"\n", argv[o.i - 1]);
+			fprintf(stderr, "[ERROR] unknown option in \"%s\"\n", argv[o.erri]);
 			return 1;
 		}
 	}
@@ -647,18 +647,18 @@ int main_map(int argc, char *argv[])
 				return 1;
 			}
 			mo.meth_tags = tags;
-		} else if (c == 316) { // --max-sub-occ
+		} else if (c == 320) { // --max-sub-occ
 			mo.max_sub_occ = atoi(o.arg);
-		} else if (c == 317) { // --min-sub-occ
+		} else if (c == 321) { // --min-sub-occ
 			mo.min_sub_occ = atoi(o.arg);
-		} else if (c == 318) { // --alt
+		} else if (c == 316) { // --alt
 			alt_fn = o.arg;
-		} else if (c == 319) { // --alt-records
+		} else if (c == 317) { // --alt-records
 			mo.flag |= MB_F_ALT_RECORDS;
-		} else if (c == 320) { // --alt-lift-tol
+		} else if (c == 318) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
-		} else if (c == 321) { // --pe-pair-primary[=yes|no]
+		} else if (c == 319) { // --pe-pair-primary[=yes|no]
 			if (o.arg == 0) mo.pe_pair_primary = 1; // bare flag forces on
 			else if (strcmp(o.arg, "yes") == 0 || strcmp(o.arg, "y") == 0) mo.pe_pair_primary = 1;
 			else if (strcmp(o.arg, "no") == 0 || strcmp(o.arg, "n") == 0) mo.pe_pair_primary = 0;
@@ -706,6 +706,7 @@ int main_map(int argc, char *argv[])
 			return usage_map(stdout, &mo);
 		}
 	}
+	if (mo.flag & MB_F_NO_ALN) mo.flag |= MB_F_NO_PAIRING | MB_F_PAF;
 	if (mo.max_sub_occ > 0 && mo.min_sub_occ > mo.max_sub_occ) {
 		fprintf(stderr, "[ERROR] --min-sub-occ (%d) must not exceed --max-sub-occ (%d)\n", mo.min_sub_occ, mo.max_sub_occ);
 		return 1;

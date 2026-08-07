@@ -1,4 +1,4 @@
-.TH minibwa 1 "30 July 2026" "minibwa-0.6 (r416)" "Bioinformatics tools"
+.TH minibwa 1 "6 August 2026" "minibwa-0.7 (r421)" "Bioinformatics tools"
 .SH NAME
 .PP
 minibwa - short/long-read alignment against a reference genome
@@ -246,7 +246,9 @@ Retain at most
 secondary alignments [101]
 .TP
 .B --chain-only
-Perform chaining only without base alignment
+Perform chaining only without base alignment. Force
+.B -fP
+to disable pairing and output PAF.
 .TP
 .BR --long = yes | no
 Whether to use the long-read heuristic for all reads

@@ -74,7 +74,7 @@ echo "[test-output] read length = $READ_LEN; ALT contig = chrP_altA; lifted to c
 # 1. WITHOUT --alt-records: no chrP_altA record in SAM
 # ============================================================
 echo "== WITHOUT --alt-records =="
-"$MINIBWA" mem "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/no-flag.sam"
+"$MINIBWA" map "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/no-flag.sam"
 alt_lines=$(mawk '$1!~/^@/ && $3=="chrP_altA"' "$TMPD/no-flag.sam" | wc -l | tr -d ' ')
 [ "$alt_lines" -eq 0 ] \
     || fail "without --alt-records: $alt_lines chrP_altA record(s) emitted (expected 0)"
@@ -84,7 +84,7 @@ ok "without --alt-records: no chrP_altA record (ALT hits suppressed by default)"
 # 2. WITH --alt-records: chrP_altA IS emitted with full-length SEQ
 # ============================================================
 echo "== WITH --alt-records =="
-"$MINIBWA" mem --alt-records "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/with-flag.sam"
+"$MINIBWA" map --alt-records "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/with-flag.sam"
 
 # Check the ALT record exists
 alt_lines=$(mawk '$1!~/^@/ && $3=="chrP_altA"' "$TMPD/with-flag.sam" | wc -l | tr -d ' ')
@@ -134,7 +134,7 @@ print('@r-alt2'); print(core); print('+'); print(qual)
 "$MINIBWA" index "$TMPD/ref2.fa" 2>/dev/null
 
 # With --alt pointing to the non-adjacent file, ALT record should appear
-"$MINIBWA" mem --alt-records --alt "$TMPD/altdir/ref2.alt" \
+"$MINIBWA" map --alt-records --alt "$TMPD/altdir/ref2.alt" \
     "$TMPD/ref2.fa" "$TMPD/reads2.fq" 2>/dev/null > "$TMPD/alt-file.sam"
 alt2_lines=$(mawk '$1!~/^@/ && $3=="chrQ_altX"' "$TMPD/alt-file.sam" | wc -l | tr -d ' ')
 [ "$alt2_lines" -gt 0 ] \
@@ -144,7 +144,7 @@ ok "--alt FILE: chrQ_altX ALT record present ($alt2_lines line(s)) from non-adja
 # WITHOUT --alt FILE and no adjacent .alt: chrQ_altX is not is_alt, so it
 # appears as a plain primary (FLAG has no 0x100/0x800 bits set), not an ALT hit.
 # With --alt FILE: chrQ_altX IS is_alt -> FLAG has 0x100 or 0x800.
-"$MINIBWA" mem --alt-records "$TMPD/ref2.fa" "$TMPD/reads2.fq" 2>/dev/null > "$TMPD/no-alt-file.sam"
+"$MINIBWA" map --alt-records "$TMPD/ref2.fa" "$TMPD/reads2.fq" 2>/dev/null > "$TMPD/no-alt-file.sam"
 alt2_lines_without=$(mawk '$1!~/^@/ && $3=="chrQ_altX"' "$TMPD/no-alt-file.sam" | wc -l | tr -d ' ')
 [ "$alt2_lines_without" -gt 0 ] \
     || fail "--alt FILE sanity: without --alt, chrQ_altX record missing; cannot compare FLAG classification"
@@ -170,8 +170,8 @@ CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
 sam_body() { mawk '$1!~/^@/{print}' "$1"; }
 
 if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-no-flag.sam"
-    "$MINIBWA" mem --outn=5 --alt-records "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-with-flag.sam"
+    "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-no-flag.sam"
+    "$MINIBWA" map --outn=5 --alt-records "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-with-flag.sam"
     [ -s "$TMPD/chrM-se-no-flag.sam" ] || fail "chrM SE baseline: empty output"
     sam_body "$TMPD/chrM-se-no-flag.sam"   > "$TMPD/chrM-se-no-flag.body"
     sam_body "$TMPD/chrM-se-with-flag.sam" > "$TMPD/chrM-se-with-flag.body"
@@ -179,8 +179,8 @@ if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
         || fail "chrM SE baseline: --alt-records changed alignment records without .alt"
     ok "chrM SE baseline: alignment records byte-identical with/without --alt-records (no .alt => inert)"
     if [ -f "$CHRM_R2" ]; then
-        "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-no-flag.sam"
-        "$MINIBWA" mem --outn=5 --alt-records "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-with-flag.sam"
+        "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-no-flag.sam"
+        "$MINIBWA" map --outn=5 --alt-records "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-with-flag.sam"
         sam_body "$TMPD/chrM-pe-no-flag.sam"   > "$TMPD/chrM-pe-no-flag.body"
         sam_body "$TMPD/chrM-pe-with-flag.sam" > "$TMPD/chrM-pe-with-flag.body"
         cmp -s "$TMPD/chrM-pe-no-flag.body" "$TMPD/chrM-pe-with-flag.body" \

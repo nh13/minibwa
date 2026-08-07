@@ -44,7 +44,7 @@ in_copyA() { [ "$1" -ge 490 ] && [ "$1" -lt 660 ]; }   # copyA window (~chrP:501
 in_copyB() { [ "$1" -ge 2490 ] && [ "$1" -lt 2660 ]; } # copyB window (~chrP:2501)
 
 echo "[test-pe-primary] mapping --pe-pair-primary=no (forced off) ..."
-"$MINIBWA" mem --outn=50 --pe-pair-primary=no "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
+"$MINIBWA" map --outn=50 --pe-pair-primary=no "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
     2>/dev/null | mawk '$1 !~ /^@/' > "$TMPD/off.sam"
 [ -s "$TMPD/off.sam" ] || fail "no alignments emitted (=no)"
 echo "----- r-para records (--pe-pair-primary=no) -----"
@@ -63,7 +63,7 @@ fi
 # PE-pair-primary selection is on by default -- no flag needed.  This locks the
 # auto-on-under-.alt behaviour.
 echo "[test-pe-primary] mapping AUTO (no flag; sibling .alt auto-detected) ..."
-"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
+"$MINIBWA" map --outn=50 "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
     2>/dev/null | mawk '$1 !~ /^@/' > "$TMPD/auto.sam"
 auto_pos=$(r1_primary_pos "$TMPD/auto.sam" r-para)
 [ -n "$auto_pos" ] || fail "no R1 primary record for r-para (auto)"
@@ -74,7 +74,7 @@ else
 fi
 
 echo "[test-pe-primary] mapping WITH --pe-pair-primary (explicit on) ..."
-"$MINIBWA" mem --outn=50 --pe-pair-primary "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
+"$MINIBWA" map --outn=50 --pe-pair-primary "$TMPD/ref.fa" "$TMPD/reads_1.fq" "$TMPD/reads_2.fq" \
     2>/dev/null | mawk '$1 !~ /^@/' > "$TMPD/on.sam"
 [ -s "$TMPD/on.sam" ] || fail "no alignments emitted"
 echo "----- r-para records (--pe-pair-primary) -----"

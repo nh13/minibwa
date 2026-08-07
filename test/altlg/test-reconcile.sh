@@ -77,7 +77,7 @@ echo "[test-reconcile] building reconcile fixture ..."
 "$MINIBWA" index "$TMPD/ref.fa" 2>/dev/null
 
 echo "[test-reconcile] mapping reconcile reads (--outn=50) ..."
-"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
+"$MINIBWA" map --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
     > "$TMPD/rec.full.sam"
 mawk '$1 !~ /^@/' "$TMPD/rec.full.sam" > "$TMPD/rec.sam"
 [ -s "$TMPD/rec.sam" ] || fail "reconcile mapping: no alignments emitted"
@@ -153,7 +153,7 @@ dlt=$(( lstB - lstA )); [ "$dlt" -lt 0 ] && dlt=$(( -dlt ))
 ok "(b) altA lst=$lstA altB lst=$lstB are $dlt bp apart (> MB_LIFT_TOL=10): distinct groups"
 
 echo "[test-reconcile] mapping paralog read (--outn=50) ..."
-"$MINIBWA" mem --outn=50 "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null \
+"$MINIBWA" map --outn=50 "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null \
     > "$PARD/par.full.sam"
 mawk '$1 !~ /^@/' "$PARD/par.full.sam" > "$PARD/par.sam"
 [ -s "$PARD/par.sam" ] || fail "paralog mapping: no alignments emitted"

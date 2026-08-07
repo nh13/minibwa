@@ -93,7 +93,7 @@ ok "chrHC primary hit: liftable=1 confirmed"
 # =========================================================================
 # (2)+(3) Run PE mapping and assert on flags/MAPQ.
 echo "[test-hookc] running PE minibwa mem ..."
-"$MINIBWA" mem --outn=50 "$TMPD/fix/ref.fa" \
+"$MINIBWA" map --outn=50 "$TMPD/fix/ref.fa" \
     "$TMPD/fix/reads_1.fq" "$TMPD/fix/reads_2.fq" 2>/dev/null \
     | mawk '$1 !~ /^@/' > "$TMPD/pe.sam"
 [ -s "$TMPD/pe.sam" ] || fail "PE mapping produced no alignments"

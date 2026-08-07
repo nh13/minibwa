@@ -46,7 +46,7 @@ echo "[test-survive] indexing ..."
 
 # Map with -p 0.9 (high pri_ratio to drop the ~55bp chain) --outn=50
 echo "[test-survive] mapping with -p 0.9 --outn=50 ..."
-"$MINIBWA" mem -p 0.9 --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
+"$MINIBWA" map -p 0.9 --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
     > "$TMPD/out.sam"
 
 echo "----- SAM output (-p 0.9 --outn=50) -----"

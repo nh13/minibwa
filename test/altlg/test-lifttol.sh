@@ -31,7 +31,7 @@ echo "[test-lifttol] building fixture ..."
 "$MINIBWA" index "$TMPD/ref.fa" 2>/dev/null
 
 run_mapq() { # <lift_tol>
-    "$MINIBWA" mem --outn=50 --alt-lift-tol "$1" "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
+    "$MINIBWA" map --outn=50 --alt-lift-tol "$1" "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
         | mawk '$1 !~ /^@/' > "$TMPD/t$1.sam"
     [ -s "$TMPD/t$1.sam" ] || fail "tol=$1: no alignments emitted"
     primary_mapq "$TMPD/t$1.sam" r-near

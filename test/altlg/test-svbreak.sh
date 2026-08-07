@@ -62,7 +62,7 @@ echo "[test-svbreak] building svbreak fixture ..."
 # ---------------- forward variant ----------------
 echo "== case (fwd): breakpoint-spanning ALT groups with forward primary twin =="
 "$MINIBWA" index "$TMPD/ref.fa" 2>/dev/null
-"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/fwd.full.sam"
+"$MINIBWA" map --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/fwd.full.sam"
 mawk '$1 !~ /^@/' "$TMPD/fwd.full.sam" > "$TMPD/fwd.sam"
 [ -s "$TMPD/fwd.sam" ] || fail "(fwd) no alignments emitted"
 echo "----- fwd SAM -----"
@@ -85,7 +85,7 @@ ok "(fwd) chrP_altV ALT twin demoted to secondary (flag=$fwd_alt)"
 # ---------------- reverse variant ----------------
 echo "== case (rev): breakpoint-spanning ALT groups with reverse primary twin =="
 "$MINIBWA" index "$TMPD/rev/ref.fa" 2>/dev/null
-"$MINIBWA" mem --outn=50 "$TMPD/rev/ref.fa" "$TMPD/rev/reads.fq" 2>/dev/null > "$TMPD/rev.full.sam"
+"$MINIBWA" map --outn=50 "$TMPD/rev/ref.fa" "$TMPD/rev/reads.fq" 2>/dev/null > "$TMPD/rev.full.sam"
 mawk '$1 !~ /^@/' "$TMPD/rev.full.sam" > "$TMPD/rev.sam"
 [ -s "$TMPD/rev.sam" ] || fail "(rev) no alignments emitted"
 echo "----- rev SAM -----"
@@ -128,7 +128,7 @@ open(d + "/ref.fa.alt", "w").write("chrP_altA\t0\tchrP\t201\t60\t150M\t*\t0\t0\t
 open(d + "/reads.fq", "w").write("@r-par7k\n%s\n+\n%s\n" % (COPY, "I" * 150))
 PY
 "$MINIBWA" index "$PARD/ref.fa" 2>/dev/null
-"$MINIBWA" mem --outn=50 "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null > "$PARD/par.full.sam"
+"$MINIBWA" map --outn=50 "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null > "$PARD/par.full.sam"
 mawk '$1 !~ /^@/' "$PARD/par.full.sam" > "$PARD/par.sam"
 [ -s "$PARD/par.sam" ] || fail "(par) no alignments emitted"
 echo "----- par SAM -----"

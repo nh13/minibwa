@@ -44,7 +44,7 @@ echo "[test-segdup] LIFT locus is chrP POS=$LIFT_POS1; max_occ (-c) = $C"
 
 # --- RED: projection disabled ---
 echo "== RED: MB_NO_ALT_PROJECT=1 (no projection) =="
-"$MINIBWA" mem --dbg-no-alt-proj -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
+"$MINIBWA" map --dbg-no-alt-proj -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
     2>/dev/null > "$TMPD/red.sam"
 mawk '$1 !~ /^@/' "$TMPD/red.sam" > "$TMPD/red.body.sam"
 [ -s "$TMPD/red.body.sam" ] || fail "RED: no alignments emitted"
@@ -55,7 +55,7 @@ ok "RED: no chrP candidate at LIFT POS=$LIFT_POS1 (segdup seed subsampled out)"
 
 # --- GREEN: projection enabled (default) ---
 echo "== GREEN: projection enabled (default) =="
-"$MINIBWA" mem -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
+"$MINIBWA" map -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
     2>/dev/null > "$TMPD/green.sam"
 echo "  chrP POS (GREEN): $(chrP_pos_list "$TMPD/green.sam")"
 green_hit=$(has_pos "$TMPD/green.sam" "$LIFT_POS1")
@@ -68,7 +68,7 @@ alt_present=$(mawk '$1!~/^@/ && $3=="chrP_altS"{print "1"; exit}' "$TMPD/green.s
 ok "GREEN: chrP_altS ALT hit present (the projected anchor's source seed)"
 
 # Determinism: GREEN chrP POS list is stable across runs.
-"$MINIBWA" mem -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/green2.sam"
+"$MINIBWA" map -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/green2.sam"
 [ "$(chrP_pos_list "$TMPD/green.sam")" = "$(chrP_pos_list "$TMPD/green2.sam")" ] \
     || fail "GREEN: chrP POS list not deterministic across runs"
 ok "GREEN: chrP POS list deterministic across runs"
@@ -82,8 +82,8 @@ CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
 if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
     "$MINIBWA" index "$CHRM_FA" 2>/dev/null
     # SE: default vs seam-off must be byte-identical (no ALT anchors either way).
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-on.sam"
-    "$MINIBWA" mem --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-off.sam"
+    "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-on.sam"
+    "$MINIBWA" map --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-off.sam"
     [ -s "$TMPD/chrM-se-on.sam" ] || fail "chrM SE baseline: empty output"
     grep -v '^@' "$TMPD/chrM-se-on.sam" > "$TMPD/chrM-se-on.body" || true
     grep -v '^@' "$TMPD/chrM-se-off.sam" > "$TMPD/chrM-se-off.body" || true
@@ -91,8 +91,8 @@ if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
         || fail "chrM SE baseline: projection changed alignments without .alt"
     ok "chrM SE baseline: identical alignments with/without projection (no .alt => inert)"
     if [ -f "$CHRM_R2" ]; then
-        "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-on.sam"
-        "$MINIBWA" mem --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-off.sam"
+        "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-on.sam"
+        "$MINIBWA" map --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-off.sam"
         grep -v '^@' "$TMPD/chrM-pe-on.sam" > "$TMPD/chrM-pe-on.body" || true
         grep -v '^@' "$TMPD/chrM-pe-off.sam" > "$TMPD/chrM-pe-off.body" || true
         cmp -s "$TMPD/chrM-pe-on.body" "$TMPD/chrM-pe-off.body" \

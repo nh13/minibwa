@@ -64,7 +64,7 @@ prim_mapq_mate() { mawk -v q="$2" -v mb="$3" '$1==q { f=int($2);
 
 run_pe() { # <fixture-dir> <out.sam>
     "$MINIBWA" index "$1/ref.fa" 2>/dev/null
-    "$MINIBWA" mem --outn=50 "$1/ref.fa" "$1/reads_1.fq" "$1/reads_2.fq" 2>/dev/null \
+    "$MINIBWA" map --outn=50 "$1/ref.fa" "$1/reads_1.fq" "$1/reads_2.fq" 2>/dev/null \
         | mawk '$1 !~ /^@/' > "$2"
     [ -s "$2" ] || fail "mapping produced no alignments ($1)"
 }
@@ -126,7 +126,7 @@ RD="$TMPD/resc"; /bin/sh "$MK_RESC" "$RD" 2>/dev/null
 "$MINIBWA" index "$RD/ref.fa" 2>/dev/null
 # (1) the peppered mate is rescue-only: unmapped when mapped single-end.
 mawk '/^@r-rescue/{p=4} p>0{print;p--}' "$RD/reads_2.fq" > "$RD/r2.fq"
-r2se=$("$MINIBWA" mem --outn=50 "$RD/ref.fa" "$RD/r2.fq" 2>/dev/null | mawk '$1=="r-rescue/2"{print $2; exit}')
+r2se=$("$MINIBWA" map --outn=50 "$RD/ref.fa" "$RD/r2.fq" 2>/dev/null | mawk '$1=="r-rescue/2"{print $2; exit}')
 [ -n "$r2se" ] || fail "(RESCUE) no single-end record for R2"
 [ "$(has_bit "$r2se" 4)" = "1" ] || fail "(RESCUE) R2 mapped single-end (flag=$r2se); fixture must be rescue-only"
 ok "(RESCUE) R2 is rescue-only (unmapped single-end, flag=$r2se)"

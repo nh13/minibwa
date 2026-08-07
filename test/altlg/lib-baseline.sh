@@ -45,8 +45,8 @@ chrm_baseline() {
 	else set -- "$@" "$TMPD/base-ref.fa.gz" "$_r1"; fi
 
 	"$MINIBWA" index "$TMPD/base-ref.fa.gz" 2>/dev/null
-	"$MINIBWA"   mem "$@" 2>/dev/null | grep -v '^@PG' > "$TMPD/base-patched.sam"
-	"$MB_STOCK"  mem "$@" 2>/dev/null | grep -v '^@PG' > "$TMPD/base-stock.sam"
+	"$MINIBWA" map "$@" 2>/dev/null | grep -v '^@PG' > "$TMPD/base-patched.sam"
+	"$MB_STOCK" map "$@" 2>/dev/null | grep -v '^@PG' > "$TMPD/base-stock.sam"
 
 	[ -s "$TMPD/base-patched.sam" ] || fail "$_label -- empty output from this build"
 	[ -s "$TMPD/base-stock.sam" ]   || fail "$_label -- empty output from MB_STOCK"

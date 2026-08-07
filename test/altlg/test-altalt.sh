@@ -55,7 +55,7 @@ echo "[test-altalt] building fixture ..."
 "$MINIBWA" index "$TMPD/ref.fa" 2>/dev/null
 
 echo "[test-altalt] mapping (--outn=50) ..."
-"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/full.sam"
+"$MINIBWA" map --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/full.sam"
 mawk '$1 !~ /^@/' "$TMPD/full.sam" > "$TMPD/aln.sam"
 [ -s "$TMPD/aln.sam" ] || fail "no alignments emitted"
 echo "----- altalt SAM -----"

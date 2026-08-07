@@ -13,6 +13,34 @@
 #error "Missing SSE2 or NEON intrinsics"
 #endif
 
+/* NEON's BIT computes (d & ~k) | (g & k) in one instruction -- a bitwise select of
+ * g into d under mask k. Clang will not emit it from the portable spelling:
+ * vbslq_u8(k, g, d) lowers to (k & g) | (~k & d), and for a constant splat
+ * known-bits proves ~k & d == d, folding it straight back to and/orr. Laundering k
+ * through an empty asm blocks the fold but is worse still -- the backend then
+ * materialises ~k in a register and emits three ops. Only a direct BIT gets the
+ * one-instruction form, so it is written out.
+ *
+ * TWO wrappers, not one, because the two call-site shapes have different portable
+ * equivalents and collapsing them silently miscompiles off arm64:
+ *   _flag  - OR a flag bit in, where d's k bits are known clear. `d | (g & k)`.
+ *   _blend - select a whole lane, where k is an all-ones/all-zeros compare mask.
+ *            `d | (g & k)` is WRONG here: at the b > z site d already holds 1, so
+ *            OR yields 3 where the blend must yield 2.
+ * Both are exactly BIT on arm64; each keeps the cheapest correct form elsewhere. */
+#if defined(__ARM_NEON)
+static inline __m128i mbsb_bit(__m128i d, __m128i g, __m128i k)
+{
+	__asm__("bit %0.16b, %1.16b, %2.16b" : "+w"(d) : "w"(g), "w"(k));
+	return d;
+}
+static inline __m128i mbsb_bitins_flag(__m128i d, __m128i g, __m128i k) { return mbsb_bit(d, g, k); }
+static inline __m128i mbsb_bitsel(__m128i d, __m128i g, __m128i k) { return mbsb_bit(d, g, k); }
+#else
+static inline __m128i mbsb_bitins_flag(__m128i d, __m128i g, __m128i k) { return _mm_or_si128(d, _mm_and_si128(g, k)); }
+static inline __m128i mbsb_bitsel(__m128i d, __m128i g, __m128i k) { return _mm_blendv_epi8(d, g, k); }
+#endif
+
 /* s2n-lite.h has no _mm_shuffle_epi8; carry it here until this ships.
  * NEON's vqtbl1q_u8 returns 0 for any index >= 16, while SSSE3's _mm_shuffle_epi8
  * returns 0 only when bit 7 is set -- they agree on [0,15] and on [128,255] and
@@ -294,7 +322,7 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 #ifdef __SSE4_1__
 				d = _mm_and_si128(_mm_cmpgt_epi8(a, z), _mm_set1_epi8(1));       // d = a  > z? 1 : 0
 				z = _mm_max_epi8(z, a);
-				d = _mm_blendv_epi8(d, _mm_set1_epi8(2), _mm_cmpgt_epi8(b,  z)); // d = b  > z? 2 : d
+				d = mbsb_bitsel(d, _mm_set1_epi8(2), _mm_cmpgt_epi8(b,  z)); // d = b  > z? 2 : d
 				z = _mm_max_epi8(z, b);
 				d = _mm_blendv_epi8(d, _mm_set1_epi8(3), _mm_cmpgt_epi8(a2, z)); // d = a2 > z? 3 : d
 				z = _mm_max_epi8(z, a2);
@@ -320,16 +348,16 @@ void ksw_extd2_sse(void *km, int qlen, const uint8_t *query, int tlen, const uin
 				__dp_code_block2;
 				tmp = _mm_cmpgt_epi8(a, zero_);
 				_mm_store_si128(&x[t],  _mm_sub_epi8(_mm_and_si128(tmp, a),  qe_));
-				d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x08))); // d = a > 0? 1<<3 : 0
+				d = mbsb_bitins_flag(d, tmp, _mm_set1_epi8(0x08)); // d = a > 0? 1<<3 : 0
 				tmp = _mm_cmpgt_epi8(b, zero_);
 				_mm_store_si128(&y[t],  _mm_sub_epi8(_mm_and_si128(tmp, b),  qe_));
-				d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x10))); // d = b > 0? 1<<4 : 0
+				d = mbsb_bitins_flag(d, tmp, _mm_set1_epi8(0x10)); // d = b > 0? 1<<4 : 0
 				tmp = _mm_cmpgt_epi8(a2, zero_);
 				_mm_store_si128(&x2[t], _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
-				d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x20))); // d = a > 0? 1<<5 : 0
+				d = mbsb_bitins_flag(d, tmp, _mm_set1_epi8(0x20)); // d = a > 0? 1<<5 : 0
 				tmp = _mm_cmpgt_epi8(b2, zero_);
 				_mm_store_si128(&y2[t], _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
-				d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x40))); // d = b > 0? 1<<6 : 0
+				d = mbsb_bitins_flag(d, tmp, _mm_set1_epi8(0x40)); // d = b > 0? 1<<6 : 0
 				_mm_store_si128(&pr[t], d);
 			}
 		} else { // gap right-alignment

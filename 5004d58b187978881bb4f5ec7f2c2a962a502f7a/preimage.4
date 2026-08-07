@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <errno.h>
 #include <zlib.h>
 #include "kommon.h"
@@ -147,12 +148,21 @@ static void worker_for_format(void *data, long i, int tid)
 				int32_t n_sec = 0;
 				for (j = 0; j < s->n_hit[k]; ++j) {
 					const mb_hit_t *h = &s->hit[k][j];
-					if (h->parent == h->id || n_sec < opt->out_n)
-						mb_format(km, out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], j, opt->flag, k - seg_st, mate_qlen);
-					n_sec += (h->parent != h->id);
+					if (h->parent == h->id || n_sec < opt->out_n) {
+						if (h->parent != h->id) {
+							const mb_hit_t *p = &s->hit[k][h->parent];
+							if (p->p && h->p) {
+								if (h->p->dp_max < (double)opt->out_s * p->p->dp_max) continue;
+							} else {
+								if (h->score < (double)opt->out_s * p->score) continue;
+							}
+						}
+						mb_format(km, out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], j, opt, k - seg_st, mate_qlen);
+						n_sec += (h->parent != h->id);
+					}
 				}
 			} else if (!(opt->flag & MB_F_NO_UNMAP)) {
-				mb_format(km, out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], -1, opt->flag, k - seg_st, mate_qlen);
+				mb_format(km, out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], -1, opt, k - seg_st, mate_qlen);
 			}
 		}
 	}
@@ -284,21 +294,13 @@ static void *worker_pipeline(void *shared, int step, void *in)
 					int32_t n_sec = 0;
 					for (j = 0; j < s->n_hit[i]; ++j) {
 						const mb_hit_t *h = &s->hit[i][j];
-						if (h->parent == h->id || n_sec < opt->out_n) {
-							if (h->parent != h->id) {
-								const mb_hit_t *p = &s->hit[i][h->parent];
-								if (p->p && h->p) {
-									if (h->p->dp_max < (double)opt->out_s * p->p->dp_max) continue;
-								} else {
-									if (h->score < (double)opt->out_s * p->score) continue;
-								}
-							}
-							mb_format(km, &out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], j, opt, i - seg_st, mate_qlen);
-							n_sec += (h->parent != h->id);
-						}
+						if (h->parent == h->id || n_sec < opt->out_n
+						    || ((opt->flag & MB_F_ALT_RECORDS) && h->is_alt))
+							mb_format(km, &out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], j, opt->flag, i - seg_st, mate_qlen);
+						n_sec += (h->parent != h->id);
 					}
 				} else if (!(opt->flag & MB_F_NO_UNMAP)) {
-					mb_format(km, &out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], -1, opt, i - seg_st, mate_qlen);
+					mb_format(km, &out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], -1, opt->flag, i - seg_st, mate_qlen);
 				}
 			}
 			fwrite(out.s, 1, out.l, s->p->fp_out);
@@ -408,16 +410,26 @@ static ko_longopt_t long_options[] = {
 	{ "chain-only",   ko_no_argument,       309 },
 	{ "meth",         ko_no_argument,       310 },
 	{ "hic",          ko_no_argument,       311 },
+<<<<<<<
+	{ "alt",          ko_required_argument, 312 },
+	{ "alt-records",  ko_no_argument,       313 },
+	{ "alt-lift-tol", ko_required_argument, 314 },
+	{ "pe-pair-primary", ko_optional_argument, 315 },
+=======
 	{ "xa",           ko_required_argument, 312 },
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
+	{ "meth-tags",    ko_required_argument, 322 },
+>>>>>>>
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
 	{ "dbg-qname",    ko_no_argument,       604 },
 	{ "dbg-aln-pe",   ko_no_argument,       605 },
 	{ "dbg-an-pos",   ko_no_argument,       606 }, // anchor position
+	{ "dbg-no-alt-proj", ko_no_argument,    607 }, // ablate ALT->primary projection (testing)
+	{ "dbg-alt-proj", ko_no_argument,       608 }, // trace projected primary anchors (testing)
 	{ "version",      ko_no_argument,       901 },
 	{ "help",         ko_no_argument,       902 },
 	{ 0, 0, 0 }
@@ -435,6 +447,8 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -b STR           output a base alignment tag: cs, ds or MD []\n");
 	fprintf(fp, "    --hic            map Hi-C reads; equivalent to option -5P\n");
 	fprintf(fp, "    --meth           map *directional* bisulfite sequencing reads\n");
+	fprintf(fp, "    --meth-tags=STR  with --meth, emit these tags: all, none, a list like XR,XG,\n");
+	fprintf(fp, "                     or ^ then a list to exclude, e.g. ^XM [all]\n");
 	fprintf(fp, "  Mapping:\n");
 	fprintf(fp, "    -k INT           min seed length [%d]\n", opt->min_len);
 	fprintf(fp, "    -c NUM           max seed occurrences [%d]\n", opt->max_occ);
@@ -452,6 +466,7 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -O INT1[,INT2]   gap open penalty [%d,%d]\n", opt->q, opt->q2);
 	fprintf(fp, "    -E INT1[,INT2]   gap extension penalty [%d,%d]\n", opt->e, opt->e2);
 	fprintf(fp, "    -s INT           suppress alignment with DP score lower than INT*{-A} [%d]\n", opt->min_dp_max);
+	fprintf(fp, "    -L INT[,INT]     5'/3' soft-clip penalty (extend through noisy ends if `mqe + end_bonus + L >= max`) [%d,%d]\n", opt->pen_clip5, opt->pen_clip3);
 	fprintf(fp, "  Paired-end:\n");
 	fprintf(fp, "    -P               skip pairing and mate rescue\n");
 	fprintf(fp, "    --rescue=INT     mate rescue for up to INT candidates; 0 to skip rescue [%d]\n", opt->max_rescue);
@@ -460,9 +475,17 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "  Input/Output:\n");
 	fprintf(fp, "    -o FILE          output file name [stdout]\n");
 	fprintf(fp, "    -u               don't output unmapped reads\n");
+<<<<<<<
+	fprintf(fp, "    --outn=INT       output up to INT secondary alignments [0]\n");
+	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
+	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
+	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
+	fprintf(fp, "    --pe-pair-primary[=yes|no]  SAM primary follows the PE-pair-chosen endpoint [auto: on with .alt]\n");
+=======
 	fprintf(fp, "    --outn=NUM       output up to {NUM,-N} secondary alignments [0]\n");
 	fprintf(fp, "    --outs=FLOAT     output a secondary hit if score at least FLOAT*bestScore [%g]\n", opt->out_s);
 	fprintf(fp, "    --xa=NUM         if <=NUM hits with score >%g%% of the best hit, output them to XA [%d]\n", opt->out_s*100.0, opt->xa_max);
+>>>>>>>
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -H STR           if STR starts with @, insert to header; or insert lines in file STR []\n");
@@ -487,6 +510,64 @@ static inline void yes_or_no(mb_opt_t *opt, uint64_t flag, int long_idx, const c
 	}
 }
 
+// Case-insensitive whole-string comparison; 1 if equal.
+static int str_ieq(const char *a, const char *b)
+{
+	for (; *a && *b; ++a, ++b)
+		if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+	return *a == 0 && *b == 0;
+}
+
+// Map one --meth-tags name to its MB_METH_TAG_* bit; 0 if it is not a tag name.
+static int32_t meth_tag_bit(const char *name, size_t len)
+{
+	if (len != 2 || (name[0] != 'X' && name[0] != 'x')) return 0;
+	if (name[1] == 'R' || name[1] == 'r') return MB_METH_TAG_XR;
+	if (name[1] == 'G' || name[1] == 'g') return MB_METH_TAG_XG;
+	if (name[1] == 'M' || name[1] == 'm') return MB_METH_TAG_XM;
+	return 0;
+}
+
+/* Parse a --meth-tags spec into an MB_METH_TAG_* mask, or -1 if malformed.
+ *
+ * Accepted: "all", "none", a comma-separated inclusion list of tag names, or a
+ * single leading '^' followed by a comma-separated exclusion list. Names are
+ * case-insensitive, and a list is a set: order and repetition do not matter.
+ * "all" and "none" are whole-spec keywords, not list members.
+ *
+ * The two list forms cannot be mixed. "XR,^XM" has no obvious reading -- "only
+ * XR" or "everything but XM"? -- so it is rejected instead of resolved
+ * arbitrarily. A '^' anywhere but the first character makes its token fail
+ * meth_tag_bit(), which is what enforces this.
+ *
+ * The separator is a comma and never whitespace, so a spec is always a single
+ * argv entry; a space-separated form would let the option swallow the next
+ * argument, which on this command line is a FASTQ. */
+static int32_t parse_meth_tags(const char *spec)
+{
+	int is_excl = (*spec == '^');
+	const char *p = is_excl? spec + 1 : spec;
+	int32_t mask = 0;
+
+	if (!is_excl) {
+		if (str_ieq(p, "all")) return MB_METH_TAG_ALL;
+		if (str_ieq(p, "none")) return 0;
+	}
+	if (*p == 0) return -1; // an empty spec or a bare "^"
+	while (*p) {
+		const char *q = p;
+		int32_t bit;
+		while (*q != 0 && *q != ',') ++q;
+		bit = meth_tag_bit(p, (size_t)(q - p));
+		if (bit == 0) return -1; // an empty, unknown or '^'-prefixed token
+		mask |= bit;
+		if (*q == 0) break;
+		p = q + 1;
+		if (*p == 0) return -1; // a trailing comma
+	}
+	return is_excl? (MB_METH_TAG_ALL & ~mask) : mask;
+}
+
 static void set_ins_size(mb_opt_t *opt, const char *arg)
 {
 	char *q;
@@ -500,11 +581,12 @@ static void set_ins_size(mb_opt_t *opt, const char *arg)
 
 int main_map(int argc, char *argv[])
 {
-	const char *opt_str = "x:o:k:c:m:p:A:B:U:b:O:E:t:K:N:PyYR:H:aul:w:W:g:5s:fI:";
+	const char *opt_str = "x:o:k:c:m:p:A:B:U:b:O:E:L:t:K:N:PyYR:H:aul:w:W:g:5s:fI:";
 	int32_t c, use_mmap = 0, mmap_preload = 1, is_meth = 0;
 	mb_idx_t *idx;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
+	const char *alt_fn = 0;
 	ketopt_t o = KETOPT_INIT;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 
@@ -545,6 +627,10 @@ int main_map(int argc, char *argv[])
 		else if (c == '5') mo.flag |= MB_F_PRIMARY5;
 		else if (c == 'P') mo.flag |= MB_F_NO_PAIRING;
 		else if (c == 's') mo.min_dp_max = atoi(o.arg);
+		else if (c == 'L') {
+			mo.pen_clip5 = mo.pen_clip3 = strtol(o.arg, &s, 10);
+			if (*s == ',') mo.pen_clip3 = strtol(s + 1, &s, 10);
+		}
 		else if (c == 'o') fn_out = o.arg;
 		else if (c == 't') mo.n_thread = atoi(o.arg);
 		else if (c == 'R') rg_line = o.arg;
@@ -571,6 +657,20 @@ int main_map(int argc, char *argv[])
 			mo.flag |= MB_F_METH;
 		} else if (c == 311) { // --hic
 			mo.flag |= MB_F_PRIMARY5 | MB_F_NO_PAIRING;
+<<<<<<<
+		} else if (c == 312) { // --alt
+			alt_fn = o.arg;
+		} else if (c == 313) { // --alt-records
+			mo.flag |= MB_F_ALT_RECORDS;
+		} else if (c == 314) { // --alt-lift-tol
+			mo.lift_tol = atoi(o.arg);
+			if (mo.lift_tol < 0) mo.lift_tol = 0;
+		} else if (c == 315) { // --pe-pair-primary[=yes|no]
+			if (o.arg == 0) mo.pe_pair_primary = 1; // bare flag forces on
+			else if (strcmp(o.arg, "yes") == 0 || strcmp(o.arg, "y") == 0) mo.pe_pair_primary = 1;
+			else if (strcmp(o.arg, "no") == 0 || strcmp(o.arg, "n") == 0) mo.pe_pair_primary = 0;
+			else fprintf(stderr, "[WARNING]\033[1;31m option '--pe-pair-primary' only accepts 'yes' or 'no'.\033[0m\n");
+=======
 		} else if (c == 312) { // --xa
 			mo.xa_max = kom_parse_num(o.arg, 0);
 		} else if (c == 313) { // --mmap
@@ -578,6 +678,15 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
+		} else if (c == 322) { // --meth-tags
+			int32_t tags = parse_meth_tags(o.arg);
+			if (tags < 0) {
+				fprintf(stderr, "[ERROR] malformed --meth-tags spec '%s'; expected 'all', 'none', "
+						"a comma-separated list of XR/XG/XM, or '^' followed by such a list\n", o.arg);
+				return 1;
+			}
+			mo.meth_tags = tags;
+>>>>>>>
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -590,6 +699,10 @@ int main_map(int argc, char *argv[])
 			kom_dbg_flag |= MB_DBG_ALN_PE;
 		} else if (c == 606) { // --dbg-an-pos
 			kom_dbg_flag |= MB_DBG_AN_POS;
+		} else if (c == 607) { // --dbg-no-alt-proj
+			kom_dbg_flag |= MB_DBG_NO_ALT_PROJ;
+		} else if (c == 608) { // --dbg-alt-proj
+			kom_dbg_flag |= MB_DBG_ALT_PROJ;
 		} else if (c == 'K') {
 			mo.mb_size = mo.max_mb_size = kom_parse_num(o.arg, &s);
 			if (*s == ',') mo.max_mb_size = kom_parse_num(s + 1, &s);
@@ -624,6 +737,13 @@ int main_map(int argc, char *argv[])
 	is_meth = !!(mo.flag & MB_F_METH);
 	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
 	kom_assert(idx, "failed to load the index.");
+	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
+	/* Resolve the PE-pair-primary auto default now that the .alt (if any) is loaded:
+	 * on when ALT-aware, off otherwise -- which keeps plain `minibwa mem` (no .alt)
+	 * byte-identical to baseline.  An explicit --pe-pair-primary[=yes|no] overrides. */
+	if (mo.pe_pair_primary < 0) mo.pe_pair_primary = mb_idx_has_alt(idx) ? 1 : 0;
+	if (mo.pe_pair_primary) mo.flag |= MB_F_PE_PAIR_PRI;
+	else mo.flag &= ~MB_F_PE_PAIR_PRI;
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

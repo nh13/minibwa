@@ -17,6 +17,9 @@
 set -eu
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
+
+# Shared no-.alt baseline check (see lib-baseline.sh).
+. "$(dirname "$0")/lib-baseline.sh"
 MK="$MDIR/test/altlg/mkfixture-pe-primary.sh"
 TMPD=$(mktemp -d /tmp/altlg-pe-primary.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
@@ -86,18 +89,8 @@ else
     fail "r-para/1 primary at chrP:$pos; expected copyA in [490,660) (mate-consistent), not copyB"
 fi
 
-echo "[test-pe-primary] default (no flag) chrM PE byte-identical ..."
-CHRM_FA="$MDIR/test/chrM-human.fa.gz"; CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"; CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
-if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ] && [ -f "$CHRM_R2" ]; then
-    "$MINIBWA" index "$CHRM_FA" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/m-a.sam"
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/m-b.sam"
-    cmp -s "$TMPD/m-a.sam" "$TMPD/m-b.sam" \
-        && ok "chrM PE byte-identical across default runs (opt-in off)" \
-        || fail "chrM PE differs between default runs"
-else
-    echo "  skip: chrM PE baseline files not found"
-fi
+echo "[test-pe-primary] chrM PE baseline (no .alt): byte-identical to stock ..."
+chrm_baseline "(BASELINE) chrM" pe --outn=5
 
 echo "[test-pe-primary] PASS"
 exit 0

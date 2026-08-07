@@ -623,7 +623,13 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 		 * ALT twins. */
 		mb_place_t *kept_pl = 0;
 		int n_kept = 0;
-		if (l2b) kept_pl = Kmalloc(km, mb_place_t, n); /* worst-case: all kept */
+		/* The survival guard below can only fire on an ALT hit, and hit->is_alt is
+		 * copied from l2b->ctg[tid].is_alt -- so with no .alt loaded no hit is ever
+		 * ALT, kept_pl is written but never read, and every mb_hit_place() call is
+		 * wasted. Gating on the contig count keeps that cost off the common path;
+		 * `l2b` itself is the sequence index and is always present. */
+		const int use_lift = l2b && l2b->n_alt_ctg > 0;
+		if (use_lift) kept_pl = Kmalloc(km, mb_place_t, n); /* worst-case: all kept */
 		for (i = 0; i < n; ++i) {
 			int p = r[i].parent;
 			if (p == i || r[i].inv) {
@@ -632,7 +638,7 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 				if (!(r[i].qs == r[p].qs && r[i].qe == r[p].qe && r[i].tid == r[p].tid && r[i].ts == r[p].ts && r[i].te == r[p].te))
 					keep[i] = 1, ++n_2nd;
 			}
-			if (l2b && keep[i]) {
+			if (use_lift && keep[i]) {
 				/* Record non-ALT primaries too: their "lifted" placement is their own
 				 * position, which is exactly the target co-location ALT twins must match. */
 				mb_place_t pl = mb_hit_place(l2b, &r[i]);
@@ -643,7 +649,7 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 		 * if its lifted placement co-locates with any already-kept hit.  This is
 		 * intentionally generous: over-keeping is cheap; the authoritative grouping
 		 * happens later.  Never make this tolerance tighter than MB_LIFT_TOL. */
-		if (l2b) {
+		if (use_lift) {
 			for (i = 0; i < n; ++i) {
 				if (!keep[i] && r[i].is_alt) {
 					if (mb_place_matches_any(l2b, &r[i], kept_pl, n_kept, lift_tol))

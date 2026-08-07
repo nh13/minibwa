@@ -29,6 +29,9 @@ set -eu
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
+
+# Shared no-.alt baseline check (see lib-baseline.sh).
+. "$(dirname "$0")/lib-baseline.sh"
 MK_SV="$MDIR/test/altlg/mkfixture-svbreak.sh"
 
 TMPD=$(mktemp -d /tmp/altlg-svbreak.XXXXXX)
@@ -143,25 +146,8 @@ ok "(par) r-par7k MAPQ=$par_mapq (paralogs not merged; multi-interval change is 
 
 # =========================================================================
 # --- baseline: chrM (no .alt) — mb_any_alt gate => byte-identical ---
-echo "[test-svbreak] chrM baseline (no .alt; gate => pass never runs) ..."
-CHRM_FA="$MDIR/test/chrM-human.fa.gz"
-CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
-if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
-    # Index into TMPD (not next to the shared fixture) so the test is hermetic and
-    # does not race other tests that index the same chrM.
-    cp "$CHRM_FA" "$TMPD/chrM.fa.gz"
-    "$MINIBWA" index "$TMPD/chrM.fa.gz" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$TMPD/chrM.fa.gz" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-a.sam"
-    "$MINIBWA" mem --outn=5 "$TMPD/chrM.fa.gz" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-b.sam"
-    [ -s "$TMPD/chrM-a.sam" ] || fail "chrM baseline: empty output"
-    if cmp -s "$TMPD/chrM-a.sam" "$TMPD/chrM-b.sam"; then
-        ok "chrM baseline: byte-identical across runs (no .alt => gate off => grouping inert)"
-    else
-        fail "chrM baseline: output differs between runs"
-    fi
-else
-    echo "  skip: chrM baseline files not found ($CHRM_FA)"
-fi
+echo "[test-svbreak] chrM baseline (no .alt): byte-identical to stock ..."
+chrm_baseline "(BASELINE) chrM" se --outn=5
 
 echo "[test-svbreak] PASS"
 exit 0

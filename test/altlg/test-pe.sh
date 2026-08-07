@@ -37,6 +37,9 @@ set -eu
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
+
+# Shared no-.alt baseline check (see lib-baseline.sh).
+. "$(dirname "$0")/lib-baseline.sh"
 MK_HAPPY="$MDIR/test/altlg/mkfixture-pe-happy.sh"
 MK_PARA="$MDIR/test/altlg/mkfixture-pe-paralog.sh"
 MK_RESC="$MDIR/test/altlg/mkfixture-pe-rescue.sh"
@@ -149,23 +152,8 @@ rg_flag=$(mawk '$1=="r-rescue" && $3=="chrP_altG" && int($2/128)%2==1{print $2; 
 ok "(RESCUE) rescued chrP_altG hit is grouped (secondary 0x100, not a competing pair)"
 
 # =========================================================================
-echo "[test-pe] (BASELINE) chrM PE, no .alt: byte-identical across runs ..."
-CHRM_FA="$MDIR/test/chrM-human.fa.gz"
-CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
-CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
-if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ] && [ -f "$CHRM_R2" ]; then
-    "$MINIBWA" index "$CHRM_FA" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-a.sam"
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-b.sam"
-    [ -s "$TMPD/chrM-a.sam" ] || fail "(BASELINE) empty chrM PE output"
-    if cmp -s "$TMPD/chrM-a.sam" "$TMPD/chrM-b.sam"; then
-        ok "(BASELINE) chrM PE byte-identical across runs (hooks gated => inert without .alt)"
-    else
-        fail "(BASELINE) chrM PE output differs between runs"
-    fi
-else
-    echo "  skip: chrM PE baseline files not found"
-fi
+echo "[test-pe] (BASELINE) chrM PE, no .alt: byte-identical to stock ..."
+chrm_baseline "(BASELINE) chrM PE" pe --outn=5
 
 echo "[test-pe] PASS"
 exit 0

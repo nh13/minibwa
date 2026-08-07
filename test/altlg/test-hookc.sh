@@ -35,6 +35,9 @@ set -eu
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
+
+# Shared no-.alt baseline check (see lib-baseline.sh).
+. "$(dirname "$0")/lib-baseline.sh"
 MKFIXTURE="$MDIR/test/altlg/mkfixture-hookc.sh"
 EX_PLACE="$MDIR/api-test/ex-place-check"
 
@@ -142,25 +145,8 @@ ok "R1 primary: chrHC pos=301 proper-pair primary, MAPQ=$r1_mapq > 0 (flag=$r1_f
 
 # =========================================================================
 # (4) Baseline: chrM PE with no .alt -> byte-identical across runs.
-echo "[test-hookc] (BASELINE) chrM PE, no .alt: byte-identical across runs ..."
-CHRM_FA="$MDIR/test/chrM-human.fa.gz"
-CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
-CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
-if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ] && [ -f "$CHRM_R2" ]; then
-    "$MINIBWA" index "$CHRM_FA" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null \
-        > "$TMPD/chrM-a.sam"
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null \
-        > "$TMPD/chrM-b.sam"
-    [ -s "$TMPD/chrM-a.sam" ] || fail "(BASELINE) empty chrM PE output"
-    if cmp -s "$TMPD/chrM-a.sam" "$TMPD/chrM-b.sam"; then
-        ok "(BASELINE) chrM PE byte-identical across runs (Hook C gated => inert without .alt)"
-    else
-        fail "(BASELINE) chrM PE output differs between runs"
-    fi
-else
-    echo "  skip: chrM PE baseline files not found"
-fi
+echo "[test-hookc] chrM baseline (no .alt): byte-identical to stock ..."
+chrm_baseline "(BASELINE) chrM" pe --outn=5
 
 echo "[test-hookc] PASS"
 exit 0

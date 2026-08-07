@@ -26,6 +26,9 @@ MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MKFIXTURE="$MDIR/test/altlg/mkfixture-survive.sh"
 MINIBWA="$MDIR/minibwa"
 
+# Shared no-.alt baseline check (see lib-baseline.sh).
+. "$(dirname "$0")/lib-baseline.sh"
+
 TMPD=$(mktemp -d /tmp/altlg-survive.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -83,29 +86,8 @@ fi
 # ---------------------------------------------------------------------------
 # Part 2: chrM baseline — guard never fires (no .alt -> l2b has no ALT ctgs)
 # ---------------------------------------------------------------------------
-echo "[test-survive] baseline: chrM (no .alt) ..."
-CHRM_FA="$MDIR/test/chrM-human.fa.gz"
-CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
-
-if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
-    # Confirms the guard is inert without a .alt file: all hits have is_alt=0,
-    # so pass 2 never force-keeps anything — semantics = "guard never fires."
-    # Hard failure on empty output catches crashes or tool regressions silently
-    # swallowing output that would otherwise appear as a spurious skip.
-    "$MINIBWA" index "$CHRM_FA" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-a.sam"
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-b.sam"
-    if [ ! -s "$TMPD/chrM-a.sam" ] || [ ! -s "$TMPD/chrM-b.sam" ]; then
-        fail "chrM baseline: unexpectedly empty output"
-    fi
-    if cmp -s "$TMPD/chrM-a.sam" "$TMPD/chrM-b.sam"; then
-        ok "chrM baseline: output byte-identical (guard never fires without .alt)"
-    else
-        fail "chrM baseline: output differs between runs (non-determinism?)"
-    fi
-else
-    echo "  skip: chrM baseline files not found ($CHRM_FA)"
-fi
+echo "[test-survive] chrM baseline (no .alt): byte-identical to stock ..."
+chrm_baseline "(BASELINE) chrM" se --outn=5
 
 echo "[test-survive] PASS"
 exit 0

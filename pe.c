@@ -410,9 +410,13 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 				 * (twin-exclusion) makes the pair look unpaired, so mate rescue re-runs and
 				 * re-discovers an already-present ALT hit -- without this guard that
 				 * yields two identical secondary SAM records.  An identical-coordinate
-				 * duplicate carries no new information, so dropping it is safe for the
-				 * non-ALT path too. */
-				{
+				 * duplicate carries no new information, so dropping it would be safe
+				 * on the non-ALT path too -- but "safe" is not "byte-identical", and
+				 * the manifest promises byte-identity without a .alt.  The duplicate
+				 * only arises from twin-exclusion, which is an ALT mechanism, so gate
+				 * on ALT being involved and leave the baseline path untouched.  If
+				 * this is worth having generally it belongs upstream on its own. */
+				if (mb_any_alt(h1->n, h1->a) || ht.is_alt) {
 					int32_t e; int dup = 0;
 					for (e = 0; e < h1->n; ++e) {
 						const mb_hit_t *he = &h1->a[e];
@@ -623,12 +627,19 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 		 * The surviving single pair is then an arbitrary pick of one tied copy, so the
 		 * high pair-based mapq overstates confidence -- damp it to ~0 (bwa-mem stays
 		 * cautious here too).  Conditions (a)+(b) keep this off genuine recoveries,
-		 * where the mate fits exactly one copy.  Reuses already-computed fields.  This
-		 * only fires when ALT lifting has re-exposed the second co-optimal copy as a
-		 * representative, so it is a no-op without a .alt (byte-identical to baseline). */
+		 * where the mate fits exactly one copy.  Reuses already-computed fields.
+		 *
+		 * Gated on an ALT hit actually being present.  This block used to carry an
+		 * ARGUMENT that it was a no-op without a .alt rather than a check, and the
+		 * argument was wrong: two genuine paralogs both surviving as representatives
+		 * with dp_max within opt->a, plus a rescue tie, satisfies (a)-(c) with no ALT
+		 * anywhere.  Measured on 100k HG002 WGS pairs against an index with no .alt,
+		 * the SAM differed from stock.  The chrM fixture is too small to reach here,
+		 * so the distribution's byte-identity gate passed throughout. */
 		{	int rr;
 			for (rr = 0; rr < 2; ++rr) {
 				int32_t j, n_coopt = 0;
+				if (!mb_any_alt(n_hit[rr], hit[rr])) continue;
 				if (!h[!rr]->rescued || h[rr]->rescued || !rescue_tie[rr]) continue;
 				for (j = 0; j < n_hit[rr]; ++j) {
 					const mb_hit_t *hj = &hit[rr][j];

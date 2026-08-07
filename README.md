@@ -16,6 +16,7 @@
 |---|---|---|---|---|
 | `ops-distro` | — | unsubmitted | identical | distribution manifest, assembly engine and workflows |
 | `ll-affine-reassoc` | [lh3/minibwa#37](https://github.com/lh3/minibwa/pull/37) | rejected | identical | reassociate the affine-gap recurrence in ksw2_ll for arm64 |
+| `ksw2-extension-kernels` | — | unsubmitted | identical | shuffle-LUT prepass, one-vext rail shift and 16-wide exact-max in ksw2_extd2/extz2 |
 | `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two |
 | `index-threads-v2` | — | unsubmitted | identical | parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe) |
 | `extd2-avx512` | [lh3/minibwa#20](https://github.com/lh3/minibwa/pull/20) | open | identical | AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT |

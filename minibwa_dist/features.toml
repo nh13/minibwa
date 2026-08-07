@@ -64,7 +64,12 @@ name = "smem-search-memtraffic"
 branch = "perf/smem-search-memtraffic"
 required = false
 output = "identical"
-summary = "prefetch occ in the k-mer-cache path; -4.4% of SMEM time"
+# The summary used to quote "-4.4% of SMEM time". That number has no artifact
+# behind it -- it was recalled from a session transcript, the harness it cited
+# does not exist in the tree, and the commit's own message says -10.4%. What IS
+# reproducible is the whole-stack ladder increment, so quote that instead and
+# say which measurement it is.
+summary = "prefetch occ in the k-mer-cache path; -0.9 to -1.7 pp whole-stack on c8g/c6a, flat on gcc 12"
 upstream = { status = "unsubmitted" }
 
 # --- shared-file features ---

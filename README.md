@@ -20,7 +20,7 @@
 | `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two |
 | `index-threads-v2` | — | unsubmitted | identical | parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe) |
 | `extd2-avx512` | [lh3/minibwa#20](https://github.com/lh3/minibwa/pull/20) | open | identical | AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT |
-| `smem-search-memtraffic` | — | unsubmitted | identical | prefetch occ in the k-mer-cache path; -4.4% of SMEM time |
+| `smem-search-memtraffic` | — | unsubmitted | identical | prefetch occ in the k-mer-cache path; -0.9 to -1.7 pp whole-stack on c8g/c6a, flat on gcc 12 |
 | `inline-appenders` | [lh3/minibwa#32](https://github.com/lh3/minibwa/pull/32) | rejected | identical | format SAM/PAF records with inline appenders; +0.4-1.2% wall |
 | `parallel-encode` | [lh3/minibwa#33](https://github.com/lh3/minibwa/pull/33) | open | identical | format SAM/PAF in the mapping step instead of the output thread |
 | `meth-cleanups` | [lh3/minibwa#19](https://github.com/lh3/minibwa/pull/19) | rejected | identical | a --meth CI test; documents the mb_align1_inv strand flip and b_ts (comments only) |

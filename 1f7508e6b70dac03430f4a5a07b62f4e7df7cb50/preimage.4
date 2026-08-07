@@ -475,14 +475,9 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	for (r = 0; r < 2; ++r) {
 		ha[r].n = ha[r].m = n_hit[r];
 		ha[r].a = hit[r];
-		// Split the nt4 translation from the reverse-complement: the table lookup is a gather
-		// the compiler can't vectorize, and fusing it kept the revcomp scalar too. As two loops
-		// the revcomp auto-vectorizes (~1.4x faster on the encode), while the translation is
-		// unchanged.
-		for (i = 0; i < qlen[r]; ++i)
-			qs[r][0][i] = kom_nt4_table[(uint8_t)qseq[r][i]];
 		for (i = 0; i < qlen[r]; ++i) {
-			int32_t c = qs[r][0][i];
+			int32_t c = kom_nt4_table[(uint8_t)qseq[r][i]];
+			qs[r][0][i] = c;
 			qs[r][1][qlen[r] - 1 - i] = c < 4? 3 - c : 4;
 		}
 	}

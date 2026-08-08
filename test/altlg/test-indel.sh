@@ -37,7 +37,7 @@ echo "[test-indel] building indel fixture (.alt 75M5D75M) ..."
 [ -n "${LIFT_POS1:-}" ] || fail "fixture did not export LIFT_POS1"
 "$MINIBWA" index "$TMPD/ref.fa" 2>/dev/null
 
-"$MINIBWA" mem --dbg-alt-proj -c 4 --outn=999 \
+"$MINIBWA" map --dbg-alt-proj -c 4 --outn=999 \
     "$TMPD/ref.fa" "$TMPD/reads.fq" 2>"$TMPD/err" >"$TMPD/sam"
 echo "  MB_PROJ traces:"
 grep '^MB_PROJ' "$TMPD/err" | sed 's/^/    /' || echo "    (none)"

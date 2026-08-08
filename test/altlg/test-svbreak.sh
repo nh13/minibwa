@@ -29,6 +29,9 @@ set -eu
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
+
+# Shared no-.alt baseline check (see lib-baseline.sh).
+. "$(dirname "$0")/lib-baseline.sh"
 MK_SV="$MDIR/test/altlg/mkfixture-svbreak.sh"
 
 TMPD=$(mktemp -d /tmp/altlg-svbreak.XXXXXX)
@@ -59,7 +62,7 @@ echo "[test-svbreak] building svbreak fixture ..."
 # ---------------- forward variant ----------------
 echo "== case (fwd): breakpoint-spanning ALT groups with forward primary twin =="
 "$MINIBWA" index "$TMPD/ref.fa" 2>/dev/null
-"$MINIBWA" mem --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/fwd.full.sam"
+"$MINIBWA" map --outn=50 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/fwd.full.sam"
 mawk '$1 !~ /^@/' "$TMPD/fwd.full.sam" > "$TMPD/fwd.sam"
 [ -s "$TMPD/fwd.sam" ] || fail "(fwd) no alignments emitted"
 echo "----- fwd SAM -----"
@@ -82,7 +85,7 @@ ok "(fwd) chrP_altV ALT twin demoted to secondary (flag=$fwd_alt)"
 # ---------------- reverse variant ----------------
 echo "== case (rev): breakpoint-spanning ALT groups with reverse primary twin =="
 "$MINIBWA" index "$TMPD/rev/ref.fa" 2>/dev/null
-"$MINIBWA" mem --outn=50 "$TMPD/rev/ref.fa" "$TMPD/rev/reads.fq" 2>/dev/null > "$TMPD/rev.full.sam"
+"$MINIBWA" map --outn=50 "$TMPD/rev/ref.fa" "$TMPD/rev/reads.fq" 2>/dev/null > "$TMPD/rev.full.sam"
 mawk '$1 !~ /^@/' "$TMPD/rev.full.sam" > "$TMPD/rev.sam"
 [ -s "$TMPD/rev.sam" ] || fail "(rev) no alignments emitted"
 echo "----- rev SAM -----"
@@ -125,7 +128,7 @@ open(d + "/ref.fa.alt", "w").write("chrP_altA\t0\tchrP\t201\t60\t150M\t*\t0\t0\t
 open(d + "/reads.fq", "w").write("@r-par7k\n%s\n+\n%s\n" % (COPY, "I" * 150))
 PY
 "$MINIBWA" index "$PARD/ref.fa" 2>/dev/null
-"$MINIBWA" mem --outn=50 "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null > "$PARD/par.full.sam"
+"$MINIBWA" map --outn=50 "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null > "$PARD/par.full.sam"
 mawk '$1 !~ /^@/' "$PARD/par.full.sam" > "$PARD/par.sam"
 [ -s "$PARD/par.sam" ] || fail "(par) no alignments emitted"
 echo "----- par SAM -----"
@@ -143,25 +146,8 @@ ok "(par) r-par7k MAPQ=$par_mapq (paralogs not merged; multi-interval change is 
 
 # =========================================================================
 # --- baseline: chrM (no .alt) — mb_any_alt gate => byte-identical ---
-echo "[test-svbreak] chrM baseline (no .alt; gate => pass never runs) ..."
-CHRM_FA="$MDIR/test/chrM-human.fa.gz"
-CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
-if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
-    # Index into TMPD (not next to the shared fixture) so the test is hermetic and
-    # does not race other tests that index the same chrM.
-    cp "$CHRM_FA" "$TMPD/chrM.fa.gz"
-    "$MINIBWA" index "$TMPD/chrM.fa.gz" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$TMPD/chrM.fa.gz" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-a.sam"
-    "$MINIBWA" mem --outn=5 "$TMPD/chrM.fa.gz" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-b.sam"
-    [ -s "$TMPD/chrM-a.sam" ] || fail "chrM baseline: empty output"
-    if cmp -s "$TMPD/chrM-a.sam" "$TMPD/chrM-b.sam"; then
-        ok "chrM baseline: byte-identical across runs (no .alt => gate off => grouping inert)"
-    else
-        fail "chrM baseline: output differs between runs"
-    fi
-else
-    echo "  skip: chrM baseline files not found ($CHRM_FA)"
-fi
+echo "[test-svbreak] chrM baseline (no .alt): byte-identical to stock ..."
+chrm_baseline "(BASELINE) chrM" se --outn=5
 
 echo "[test-svbreak] PASS"
 exit 0

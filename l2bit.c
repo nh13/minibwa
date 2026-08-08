@@ -267,6 +267,7 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 		l2b->ctg[i].n_lift = 0;
 		l2b->ctg[i].is_alt = 0;
 	}
+	l2b->n_alt_ctg = 0;
 
 	fp = fopen(fn, "r");
 	if (fp == 0) return -1;
@@ -332,6 +333,9 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 		pri_pos = (uint64_t)(atol(fields[3]) - 1);
 
 		ctg = &l2b->ctg[alt_tid];
+		/* n_alt counts records (a contig may carry several); n_alt_ctg counts contigs,
+		 * so only the first record for a contig advances it. */
+		if (!ctg->is_alt) ++l2b->n_alt_ctg;
 		ctg->is_alt = 1;
 		++n_alt;
 

@@ -279,3 +279,51 @@ jobs:
           The failing step is named in the run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
           This issue is deduped by title, so it will not refile while it stays open."
+
+  # The gate above proves byte-identity on x86 only. SIMD tie-breaking can differ
+  # by architecture -- two hits with equal score can come back in a different order
+  # from a NEON kernel than an SSE one -- so a conditional-output feature could in
+  # principle perturb output on arm64 while looking clean on x86. Nothing is known
+  # to do that today; this is insurance, and it is cheap because it only rebuilds
+  # and re-gates the tree `assemble` already published.
+  #
+  # Deliberately a separate job, not a matrix over `assemble`: that job force-pushes
+  # dist-next and rerere-cache and opens the review PR. Running it twice would give
+  # two writers racing over exactly the refs the concurrency group exists to protect.
+  gate-arm64:
+    needs: assemble
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ops/distro
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Re-gate the published assembly on arm64
+        run: |
+          git fetch --no-tags origin dist-next master
+          git worktree add /tmp/cand origin/dist-next
+          # Compare against the base the assembly was actually built on, not
+          # whatever `master` happens to point at now. A stale baseline makes
+          # upstream's own changes look like a feature perturbing output, which is
+          # the single easiest way to draw a wrong conclusion from this gate.
+          BASE=$(python -c 'import json;print(json.load(open("/tmp/cand/dist-manifest.json"))["base"])')
+          MIRROR=$(git rev-parse origin/master)
+          if [ "$BASE" != "$MIRROR" ]; then
+            echo "::error::assembly base $BASE != fork mirror $MIRROR; refusing to gate against a mismatched baseline"
+            exit 1
+          fi
+          git worktree add /tmp/stock "$BASE"
+          make -C /tmp/cand  -j"$(nproc)"
+          make -C /tmp/stock -j"$(nproc)"
+          # dist-manifest.json carries this build's `merged` list, so coverage names
+          # only the features actually in the binary -- same scoping the x86 gate
+          # gets from --assembly, without passing an artifact between jobs.
+          python -m minibwa_dist.cli gates \
+            --candidate /tmp/cand/minibwa --stock /tmp/stock/minibwa \
+            --fixtures /tmp/cand/test --workdir /tmp/gates \
+            --assembly /tmp/cand/dist-manifest.json

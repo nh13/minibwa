@@ -21,7 +21,6 @@ static void mb_opt_reset(mb_opt_t *opt)
 	opt->mask_level = 0.5f;
 	opt->mask_len = 0x7fffffff;
 	opt->lift_tol = MB_LIFT_TOL;
-	opt->pe_pair_primary = -1; // auto: on when a .alt is loaded, off otherwise
 	// alignment options
 	opt->a = 2,  opt->b = 8;
 	opt->q = 12, opt->q2 = 23;

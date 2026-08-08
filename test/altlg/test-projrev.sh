@@ -71,7 +71,7 @@ echo "[test-projrev] 150bp SMEM SA=2 (ALT-contig + LIFT-reverse); -c 1 subsample
 # =========================================================================
 # --- RED: projection disabled ---
 echo "== RED: MB_NO_ALT_PROJECT=1 (no projection) =="
-"$MINIBWA" mem --dbg-no-alt-proj -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
+"$MINIBWA" map --dbg-no-alt-proj -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
     2>/dev/null > "$TMPD/red.sam"
 
 red_hit=$(has_pos "$TMPD/red.sam" "$LIFT_POS1")
@@ -86,7 +86,7 @@ ok "RED: chrP_altS alignment present (ALT seed was the sampled hit, as expected)
 # =========================================================================
 # --- GREEN: projection enabled (default) ---
 echo "== GREEN: projection enabled (default) =="
-"$MINIBWA" mem -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
+"$MINIBWA" map -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" \
     2>/dev/null > "$TMPD/green.sam"
 
 green_hit=$(has_pos "$TMPD/green.sam" "$LIFT_POS1")
@@ -121,7 +121,7 @@ alt_in_green=$(mawk '$1!~/^@/ && $3=="chrP_altS"{print "1"; exit}' "$TMPD/green.
 ok "GREEN: chrP_altS present as secondary subordinate in the liftover group"
 
 # Determinism: chrP POS=LIFT_POS1 MAPQ is stable across runs.
-"$MINIBWA" mem -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/green2.sam"
+"$MINIBWA" map -c "$C" --outn=999 "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null > "$TMPD/green2.sam"
 green2_mapq=$(mapq_at_pos "$TMPD/green2.sam" "$LIFT_POS1")
 [ "$green2_mapq" = "$green_mapq" ] \
     || fail "GREEN: chrP POS=$LIFT_POS1 MAPQ not deterministic (run1=$green_mapq run2=$green2_mapq)"
@@ -135,8 +135,8 @@ CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
 CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
 if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
     "$MINIBWA" index "$CHRM_FA" 2>/dev/null
-    "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-on.sam"
-    "$MINIBWA" mem --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-off.sam"
+    "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-on.sam"
+    "$MINIBWA" map --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-off.sam"
     [ -s "$TMPD/chrM-se-on.sam" ] || fail "chrM SE baseline: empty output"
     grep -v '^@' "$TMPD/chrM-se-on.sam" > "$TMPD/chrM-se-on.body" || true
     grep -v '^@' "$TMPD/chrM-se-off.sam" > "$TMPD/chrM-se-off.body" || true
@@ -144,8 +144,8 @@ if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
         || fail "chrM SE baseline: projection changed alignments without .alt"
     ok "chrM SE baseline: identical alignments with/without projection (no .alt => inert)"
     if [ -f "$CHRM_R2" ]; then
-        "$MINIBWA" mem --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-on.sam"
-        "$MINIBWA" mem --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-off.sam"
+        "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-on.sam"
+        "$MINIBWA" map --dbg-no-alt-proj --outn=5 "$CHRM_FA" "$CHRM_R1" "$CHRM_R2" 2>/dev/null > "$TMPD/chrM-pe-off.sam"
         grep -v '^@' "$TMPD/chrM-pe-on.sam" > "$TMPD/chrM-pe-on.body" || true
         grep -v '^@' "$TMPD/chrM-pe-off.sam" > "$TMPD/chrM-pe-off.body" || true
         cmp -s "$TMPD/chrM-pe-on.body" "$TMPD/chrM-pe-off.body" \

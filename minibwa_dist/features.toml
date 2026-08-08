@@ -19,6 +19,22 @@ upstream = { status = "unsubmitted" }
 # --- minimal feature-vs-feature overlap: mostly conflict only with upstream ---
 # Exception: single-copy-parser and extd2-avx512 both edit Makefile, so they can
 # also conflict with each other.
+
+# First because it is the most disjoint thing here: one line in main.c, which no
+# other feature touches.
+[[feature]]
+name = "cli-exit-status"
+branch = "fix/exit-status"
+required = false
+# Changes the process exit code only, never a SAM record, so the byte-identity
+# gate still applies unconditionally.
+output = "identical"
+# This rode inside meth-sam-tags until it was extracted: dist was shipping a CLI
+# behaviour change that no manifest entry declared, and the gate could not see it
+# because exit status is not SAM output.
+summary = "return the subcommand exit status from main() instead of always 0"
+upstream = { pr = 67, status = "open" }
+
 [[feature]]
 name = "ll-affine-reassoc"
 branch = "perf/ll-sse-affine-reassoc-arm"

@@ -352,7 +352,6 @@ static ko_longopt_t long_options[] = {
 	{ "alt",          ko_required_argument, 316 },
 	{ "alt-records",  ko_no_argument,       317 },
 	{ "alt-lift-tol", ko_required_argument, 318 },
-	{ "pe-pair-primary", ko_optional_argument, 319 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -409,7 +408,6 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
 	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
 	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
-	fprintf(fp, "    --pe-pair-primary[=yes|no]  SAM primary follows the PE-pair-chosen endpoint [auto: on with .alt]\n");
 	fprintf(fp, "    -y               copy FASTA/Q comments to output\n");
 	fprintf(fp, "    -Y               use soft clipping for supplementary alignments\n");
 	fprintf(fp, "    -H STR           if STR starts with @, insert to header; or insert lines in file STR []\n");
@@ -533,11 +531,6 @@ int main_map(int argc, char *argv[])
 		} else if (c == 318) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
-		} else if (c == 319) { // --pe-pair-primary[=yes|no]
-			if (o.arg == 0) mo.pe_pair_primary = 1; // bare flag forces on
-			else if (strcmp(o.arg, "yes") == 0 || strcmp(o.arg, "y") == 0) mo.pe_pair_primary = 1;
-			else if (strcmp(o.arg, "no") == 0 || strcmp(o.arg, "n") == 0) mo.pe_pair_primary = 0;
-			else fprintf(stderr, "[WARNING]\033[1;31m option '--pe-pair-primary' only accepts 'yes' or 'no'.\033[0m\n");
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -589,12 +582,6 @@ int main_map(int argc, char *argv[])
 	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
 	kom_assert(idx, "failed to load the index.");
 	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
-	/* Resolve the PE-pair-primary auto default now that the .alt (if any) is loaded:
-	 * on when ALT-aware, off otherwise -- which keeps plain `minibwa mem` (no .alt)
-	 * byte-identical to baseline.  An explicit --pe-pair-primary[=yes|no] overrides. */
-	if (mo.pe_pair_primary < 0) mo.pe_pair_primary = mb_idx_has_alt(idx) ? 1 : 0;
-	if (mo.pe_pair_primary) mo.flag |= MB_F_PE_PAIR_PRI;
-	else mo.flag &= ~MB_F_PE_PAIR_PRI;
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

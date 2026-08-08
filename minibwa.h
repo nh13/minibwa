@@ -26,7 +26,6 @@
 #define MB_F_NO_PAIRING       (0x10000LL)   // don't pair reads
 #define MB_F_METH             (0x20000LL)   // methylation mode
 #define MB_F_ALT_RECORDS      (0x40000LL)   // emit ALT-contig hits with full SEQ
-#define MB_F_PE_PAIR_PRI      (0x80000LL)   // SAM primary follows the PE-pair-chosen endpoint (resolved from opt->pe_pair_primary after .alt load)
 
 #define MB_CIGAR_MATCH      0
 #define MB_CIGAR_INS        1
@@ -89,7 +88,6 @@ typedef struct {
 	int64_t max_sw_mat;
 	int64_t cap_kalloc;
 	int32_t lift_tol;  // ALT liftover-group co-location tolerance in bp (default MB_LIFT_TOL)
-	int8_t pe_pair_primary;  // PE-pair-chosen SAM primary: -1 auto (on with .alt), 0 off, 1 on
 } mb_opt_t;
 
 struct mb_idx_s;
@@ -198,7 +196,6 @@ mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth);
 mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload);
 void mb_idx_destroy(mb_idx_t *idx);
 void mb_idx_set_alt(mb_idx_t *idx, const char *fn);
-int mb_idx_has_alt(const mb_idx_t *idx);
 const char *mb_idx_ctg_name(const mb_idx_t *idx, int32_t tid);
 int64_t mb_idx_ctg_len(const mb_idx_t *idx, int32_t tid);
 

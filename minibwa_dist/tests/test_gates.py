@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from minibwa_dist.gates import run_gates, sam_digest
+from minibwa_dist.gates import GateResult, run_gates, sam_digest
 from minibwa_dist.manifest import Feature, Manifest, Upstream
+from minibwa_dist.tests.conftest import stub_aligner
 
 
 def _sam(path: Path, *lines: str) -> Path:
@@ -44,18 +45,35 @@ def test_digest_detects_a_header_change(tmp_path: Path) -> None:
     assert sam_digest(a) != sam_digest(b)
 
 
-def _stub_aligner(path: Path, sam: str) -> Path:
-    """A `minibwa` stand-in: `index` succeeds, `map` prints a fixed SAM.
+_stub_aligner = stub_aligner
 
-    The comparison step -- the single property this module exists for -- was
-    unreachable from the tests, because reaching it needs two aligners. It does
-    not need two *real* ones.
+
+def _stub_aligner_varying(path: Path, sam: str, flag: str, other: str) -> Path:
+    """A `minibwa` stand-in whose output depends on whether `flag` was passed.
+
+    Models the exact failure the extra `_MODES` entries exist to catch: a build
+    that matches stock under default flags and diverges under one upstream flag,
+    which a paired default-flags-only comparison passes.
+
+    Emits the same flag line as `_stub_aligner` so the two agree in every mode
+    except the one carrying `flag`.
     """
     path.write_text(
-        '#!/bin/sh\nif [ "$1" = "index" ]; then exit 0; fi\ncat <<\'SAM\'\n' + sam + "SAM\n"
+        '#!/bin/sh\nif [ "$1" = "index" ]; then exit 0; fi\n'
+        f'case " $* " in *" {flag} "*) cat <<\'ALT\'\n{other}ALT\n'
+        f";; *) cat <<'SAM'\n{sam}SAM\n;; esac\n"
+        'flags=""; n=0\n'
+        'for a in "$@"; do case "$a" in -*) flags="$flags $a" ;; *) n=$((n+1)) ;; esac; done\n'
+        'printf \'mode\\t%s\\t%s\\n\' "$flags" "$n"\n'
     )
     path.chmod(0o755)
     return path
+
+
+def _default_gate(results: list[GateResult]) -> GateResult:
+    """The `default-flags-byte-identity` result, whichever order gates ran in."""
+    [result] = [r for r in results if r.name == "default-flags-byte-identity"]
+    return result
 
 
 def _fixtures(tmp_path: Path) -> Path:
@@ -87,14 +105,24 @@ def test_the_gate_passes_identical_output_and_fails_a_difference(tmp_path: Path)
     manifest = Manifest(features=(_identical_feature("a"),), withdrawn=())
 
     same = _stub_aligner(tmp_path / "same", sam)
-    [result] = run_gates(same, stock, fixtures, manifest, tmp_path / "pass")
-    assert result.passed is True
-    assert result.detail == "1 feature(s) covered: a"
+    results = run_gates(same, stock, fixtures, manifest, tmp_path / "pass")
+    assert all(r.passed for r in results), [r.detail for r in results if not r.passed]
+    assert [r.name for r in results] == [
+        "modes-are-distinct",
+        "default-flags-byte-identity",
+        "byte-identity:no-unmapped",
+        "byte-identity:base-tag",
+        "byte-identity:eqx-cigar",
+        "byte-identity:single-end",
+    ]
+    assert _default_gate(results).detail == "1 feature(s) covered: a"
 
     differs = _stub_aligner(tmp_path / "differs", sam.replace("\t60\t", "\t42\t"))
-    [result] = run_gates(differs, stock, fixtures, manifest, tmp_path / "fail")
-    assert result.passed is False
-    assert "SAM differs" in result.detail
+    results = run_gates(differs, stock, fixtures, manifest, tmp_path / "fail")
+    # Every byte-identity mode fails. `modes-are-distinct` still passes: it reads
+    # stock alone, so a candidate regression neither triggers nor masks it.
+    assert not any(r.passed for r in results if r.name != "modes-are-distinct")
+    assert "SAM differs" in _default_gate(results).detail
 
 
 def test_a_relative_binary_path_still_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -105,14 +133,14 @@ def test_a_relative_binary_path_still_resolves(tmp_path: Path, monkeypatch: pyte
     _stub_aligner(tmp_path / "minibwa", "@HD\tVN:1.6\n")
     monkeypatch.chdir(tmp_path)
 
-    [result] = run_gates(
+    results = run_gates(
         Path("./minibwa"),
         Path("./minibwa"),
         fixtures,
         Manifest(features=(), withdrawn=()),
         tmp_path / "work",
     )
-    assert result.passed is True, result.detail
+    assert all(r.passed for r in results), [r.detail for r in results if not r.passed]
 
 
 def test_coverage_names_only_the_features_in_this_build(tmp_path: Path) -> None:
@@ -125,10 +153,62 @@ def test_coverage_names_only_the_features_in_this_build(tmp_path: Path) -> None:
         features=(_identical_feature("kept"), _identical_feature("dropped")), withdrawn=()
     )
 
-    [result] = run_gates(binary, binary, fixtures, manifest, tmp_path / "work", merged=("kept",))
+    results = run_gates(binary, binary, fixtures, manifest, tmp_path / "work", merged=("kept",))
 
+    result = _default_gate(results)
     assert result.passed is True
     assert result.detail == "1 feature(s) covered: kept; 1 not in this build: dropped"
+
+
+def test_a_divergence_under_only_one_flag_fails_only_that_mode(tmp_path: Path) -> None:
+    """The reason `_MODES` has more than one entry: a build can match stock under
+    default flags and diverge under `--eqx` alone. The gate must catch it and name
+    which invocation exposed it.
+    """
+    fixtures = _fixtures(tmp_path)
+    sam = "@HD\tVN:1.6\nr1\t0\tchrM\t1\t60\t5M\n"
+    stock = _stub_aligner(tmp_path / "stock", sam)
+    candidate = _stub_aligner_varying(tmp_path / "cand", sam, "--eqx", sam.replace("5M", "3=1X1="))
+
+    results = run_gates(
+        candidate,
+        stock,
+        fixtures,
+        Manifest(features=(_identical_feature("a"),), withdrawn=()),
+        tmp_path / "work",
+    )
+
+    failed = [r for r in results if not r.passed]
+    assert [r.name for r in failed] == ["byte-identity:eqx-cigar"]
+    assert "--eqx" in failed[0].detail
+    assert _default_gate(results).passed is True, "the old gate would have shipped this"
+
+
+def test_a_redundant_mode_fails_the_distinctness_gate(tmp_path: Path) -> None:
+    """`-a` was nearly added as a mode despite being a no-op in `map`. A mode that
+    does not change stock's output inflates the coverage claim without adding
+    evidence, so it must fail rather than quietly pass five times over.
+
+    Uses a flag-INSENSITIVE stub -- every mode gets byte-identical output, which
+    is exactly what a list of no-op flags would produce against a real aligner.
+    """
+    fixtures = _fixtures(tmp_path)
+    flat = tmp_path / "flat"
+    flat.write_text(
+        '#!/bin/sh\nif [ "$1" = "index" ]; then exit 0; fi\necho "r1\t0\tchrM\t1\t60\t5M"\n'
+    )
+    flat.chmod(0o755)
+
+    results = run_gates(
+        flat, flat, fixtures, Manifest(features=(), withdrawn=()), tmp_path / "work"
+    )
+
+    [distinct] = [r for r in results if r.name == "modes-are-distinct"]
+    assert distinct.passed is False
+    assert "redundant mode(s)" in distinct.detail
+    # The byte-identity gates still pass -- the binary matches itself. Only the
+    # claim that five modes were exercised is false, which is the point.
+    assert all(r.passed for r in results if r.name != "modes-are-distinct")
 
 
 def test_a_dropped_changes_output_feature_does_not_block_the_build(tmp_path: Path) -> None:

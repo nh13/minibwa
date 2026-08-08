@@ -17,7 +17,13 @@ import minibwa_dist.cli as cli_module
 from minibwa_dist.cli import main
 from minibwa_dist.manifest import load_manifest
 from minibwa_dist.render import BLOCK_BEGIN
-from minibwa_dist.tests.conftest import branch_touching, commit_file, conflicting_branch, run
+from minibwa_dist.tests.conftest import (
+    branch_touching,
+    commit_file,
+    conflicting_branch,
+    run,
+    stub_aligner,
+)
 
 _ONE_FEATURE = """
 [[feature]]
@@ -473,13 +479,7 @@ def test_stamp_sets_an_exact_version(repo: Path, tmp_path: Path) -> None:
     assert (repo / "minibwa.h").read_text() == '#define MB_VERSION "0.6-nh13.1"\n'
 
 
-def _stub_aligner(path: Path, sam: str) -> Path:
-    """A `minibwa` stand-in: `index` succeeds, `map` prints a fixed SAM."""
-    path.write_text(
-        '#!/bin/sh\nif [ "$1" = "index" ]; then exit 0; fi\ncat <<\'SAM\'\n' + sam + "SAM\n"
-    )
-    path.chmod(0o755)
-    return path
+_stub_aligner = stub_aligner
 
 
 def test_gates_subcommand_exits_nonzero_when_the_sam_differs(

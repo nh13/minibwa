@@ -80,18 +80,15 @@ output = "identical"
 summary = "AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT"
 upstream = { pr = 20, status = "open" }
 
-[[feature]]
-name = "smem-search-memtraffic"
-branch = "perf/smem-search-memtraffic"
-required = false
-output = "identical"
-# The summary used to quote "-4.4% of SMEM time". That number has no artifact
-# behind it -- it was recalled from a session transcript, the harness it cited
-# does not exist in the tree, and the commit's own message says -10.4%. What IS
-# reproducible is the whole-stack ladder increment, so quote that instead and
-# say which measurement it is.
-summary = "prefetch occ in the k-mer-cache path; -0.9 to -1.7 pp whole-stack on c8g/c6a, flat on gcc 12"
-upstream = { status = "unsubmitted" }
+# smem-search-memtraffic graduated: upstream took the occ prefetch as lh3/minibwa#65
+# (c42d875), so master carries it and the block is deleted per "Removing a feature".
+# Recording status = "merged" is not an option -- the parser rejects graduated
+# statuses precisely so a block like this cannot linger and conflict every night.
+#
+# The weekly reconciler would normally do this deletion for us, but it keys on the
+# PR number recorded in the block, and this one said `unsubmitted`: the PR was opened
+# from a separate r421-based branch (perf/smem-prefetch-occ) rather than the frozen
+# feature branch, so there was no number here to notice going merged.
 
 # --- shared-file features ---
 # The two features below are coordinator-side, and their ladder increments are an

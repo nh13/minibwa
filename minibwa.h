@@ -5,7 +5,7 @@
 
 #include "l2bit.h"
 
-#define MB_VERSION "0.7-nh13.dev+32d519b"
+#define MB_VERSION "0.7-nh13.dev+55906d5"
 
 #define MB_F_PAF              (0x1LL)       // output in the PAF format
 #define MB_F_NO_UNMAP         (0x2LL)       // output unmapped query sequences

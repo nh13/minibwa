@@ -576,11 +576,19 @@ int main_map(int argc, char *argv[])
 		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
 		int nrg = mb_regime_discover(argv[o.ind], /*b2_available=*/0, rgs, 16);
 		if (list_regimes) { mb_regime_list_print(stdout, rgs, nrg); return 0; }
-		uint64_t budget = mb_mem_budget(index_mem_cap);
+		kom_assert(nrg > 0, "index not found (missing .l2b/.mbw); build one with 'minibwa index'");
+		/* --mmap demand-pages the index rather than residing it, so the
+		 * memory budget that gates a resident load doesn't apply: bypass it
+		 * with an unlimited budget so the fastest (bundled) regime wins. */
+		uint64_t budget = use_mmap ? (uint64_t)-1 : mb_mem_budget(index_mem_cap);
 		int pick = mb_regime_pick(rgs, nrg, budget, mode, forced_regime);
 		kom_assert(pick >= 0, "no index regime fits the memory budget (try --index-mem or build a sparser -u)");
-		fprintf(stderr, "[M::regime] selected '%s' (est %.1f GB; budget %.1f GB)\n",
-		        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
+		if (!use_mmap && rgs[pick].est_ram > budget)
+			fprintf(stderr, "[M::regime] warning: selected '%s' (est %.1f GB) exceeds the memory budget (%.1f GB)\n",
+			        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
+		if (kom_verbose >= 3)
+			fprintf(stderr, "[M::regime] selected '%s' (est %.1f GB; budget %.1f GB)\n",
+			        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
 		idx = mb_idx_load_regime(argv[o.ind], &rgs[pick], use_mmap, mmap_preload);
 	}
 	kom_assert(idx, "failed to load the index.");

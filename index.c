@@ -271,9 +271,9 @@ static int usage_index(FILE *fp, uint64_t seed, int sa_bit, int n_thread)
 	return fp == stdout? 0 : 1;
 }
 
-// parse a comma-separated list of non-negative integers (e.g. "3,4,2") into sa_bits[],
+// parse a comma-separated list of integers in [0,32) (e.g. "3,4,2") into sa_bits[],
 // capped at max_n values; empty tokens are skipped. Returns the number of values parsed,
-// or -1 on a malformed (non-numeric) token.
+// or -1 on a malformed (non-numeric) or out-of-range token.
 static int parse_sa_bits(const char *arg, int *sa_bits, int max_n)
 {
 	const char *p = arg;
@@ -284,6 +284,7 @@ static int parse_sa_bits(const char *arg, int *sa_bits, int max_n)
 		if (*p == ',') { ++p; continue; } // skip empty tokens, e.g. "3,,4"
 		v = strtol(p, &end, 10);
 		if (end == p) return -1; // no digits consumed: malformed token
+		if (v < 0 || v >= 32) return -1; // out of range: 1<<sa_bit would be UB
 		sa_bits[n++] = (int)v;
 		p = end;
 		if (*p == ',') ++p;

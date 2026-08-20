@@ -15,13 +15,46 @@
  * direction here). */
 #define MB_REGIME_MARGIN 2684354560ULL /* 2.5 GiB */
 
-int mb_regime_pick(const mb_regime_t *r, int n, uint64_t budget, uint32_t mode, const char *forced){
+/* A regime is "mmap-resident" -- demand-paged with near-zero resident RAM, so
+ * exempt from the memory budget -- only when the caller asked for --mmap AND the
+ * regime's SA is bundled in the .mbw (sa_path==""). A sidecar-SA regime always
+ * heap-loads its SA (mb_bwt_load_nosa + mb_bwt_load_sa) even under --mmap, so it
+ * must still be gated by the real budget; otherwise auto-select could pick a
+ * dense sidecar under --mmap and OOM. */
+static int mb_regime_mmap_resident(const mb_regime_t *rg, int use_mmap){
+	return use_mmap && rg->sa_path[0] == '\0';
+}
+
+int mb_regime_pick(const mb_regime_t *r, int n, uint64_t budget, uint32_t mode, int use_mmap, const char *forced){
 	int best = -1;
+
+	if (forced) {
+		for (int i = 0; i < n; ++i) {
+			if (!(r[i].mode_mask & mode)) continue;
+			if (strcmp(r[i].name, forced) == 0) return i;
+		}
+		return -1;
+	}
+
+	/* Preferred pass: highest speed_rank among mode-eligible, on-frontier
+	 * (speed_rank >= 0) regimes that fit the budget (mmap-resident regimes are
+	 * budget-exempt; sidecar regimes are gated even under --mmap). */
 	for (int i = 0; i < n; ++i) {
 		if (!(r[i].mode_mask & mode)) continue;
-		if (forced) { if (strcmp(r[i].name, forced)==0) return i; else continue; }
-		if (r[i].est_ram > budget) continue;
+		if (r[i].speed_rank < 0) continue;
+		if (!mb_regime_mmap_resident(&r[i], use_mmap) && r[i].est_ram > budget) continue;
 		if (best < 0 || r[i].speed_rank > r[best].speed_rank) best = i;
+	}
+	if (best >= 0) return best;
+
+	/* Fallback: nothing fit the budget on the preferred pass (or every
+	 * mode-eligible regime is off-frontier) -- auto-pick must never return
+	 * -1 while at least one mode-eligible regime exists, so fall back to
+	 * whichever mode-eligible regime has the smallest est_ram, irrespective
+	 * of rank or budget. */
+	for (int i = 0; i < n; ++i) {
+		if (!(r[i].mode_mask & mode)) continue;
+		if (best < 0 || r[i].est_ram < r[best].est_ram) best = i;
 	}
 	return best;
 }
@@ -56,9 +89,15 @@ static uint64_t cgroup_limit_bytes(void){
 }
 uint64_t mb_mem_budget(uint64_t user_cap){
 	uint64_t host = host_avail_bytes(), cg = cgroup_limit_bytes();
-	uint64_t b = host;
-	if (cg && cg < b) b = cg;
-	if (user_cap && user_cap < b) b = user_cap;
+	uint64_t b = 0; // 0 == "no budget determined yet"
+	// Fold in each constraint that is set (nonzero), taking the min. Seeding `b`
+	// from the first nonzero value (rather than from host) is essential: when
+	// host probing fails (host==0), the old `b=host` left b at 0, and `cg < 0` /
+	// `user_cap < 0` are never true for unsigned, so a real cgroup or --index-mem
+	// cap was silently dropped and the selector saw an unbounded budget.
+	if (host)                            b = host;
+	if (cg       && (b == 0 || cg < b))       b = cg;
+	if (user_cap && (b == 0 || user_cap < b)) b = user_cap;
 	return b;
 }
 
@@ -74,6 +113,26 @@ static int read_u32_at(const char *path, long offset, uint32_t *out){
 	return n == 1 ? 0 : -1;
 }
 
+/* Same as read_u32_at but for a host-native uint64. */
+static int read_u64_at(const char *path, long offset, uint64_t *out){
+	FILE *fp = fopen(path, "rb");
+	if (!fp) return -1;
+	if (fseek(fp, offset, SEEK_SET) != 0) { fclose(fp); return -1; }
+	size_t n = fread(out, 8, 1, fp);
+	fclose(fp);
+	return n == 1 ? 0 : -1;
+}
+
+/* RAM estimate for a regime whose SA is sampled at 1/(1<<u): everything the
+ * bundled .mbw holds *except* its own SA (bwt_portion), plus this regime's
+ * own SA footprint (sampled from seq_len at rate u), plus the .l2b and the
+ * fixed safety margin. See mb_regime_discover for how bwt_portion and
+ * seq_len are derived. */
+static uint64_t est_ram_for(uint64_t l2b_size, uint64_t bwt_portion, uint64_t seq_len, int u){
+	uint64_t sa_bytes = ((seq_len + (1ULL<<u)) >> u) * 8;
+	return l2b_size + bwt_portion + sa_bytes + MB_REGIME_MARGIN;
+}
+
 /* speed_rank for a BWT-backend regime: denser sampling (smaller sa_bit) is
  * faster to query, so it ranks higher. sa_bit < 3 (denser than 1/8) is
  * off the supported frontier for M2 -- such a regime may still be present
@@ -82,15 +141,19 @@ static int bwt_speed_rank(int sa_bit){
 	return sa_bit < 3 ? -1 : 2 * (6 - sa_bit);
 }
 
-static void fill_bwt_regime(mb_regime_t *rg, int sa_bit, uint64_t est_ram, const char *sa_path){
+static void fill_bwt_regime(mb_regime_t *rg, int sa_bit, uint64_t est_ram, const char *sa_path, int is_meth){
 	memset(rg, 0, sizeof *rg);
 	rg->backend = MB_BACKEND_BWT;
 	rg->sa_bit = sa_bit;
 	rg->est_ram = est_ram;
 	rg->speed_rank = bwt_speed_rank(sa_bit);
-	rg->mode_mask = MB_MODE_SRPE | MB_MODE_METH | MB_MODE_HIC | MB_MODE_LR;
-	snprintf(rg->name, sizeof rg->name, "sa%d", 1 << sa_bit);
-	if (sa_path) strncpy(rg->sa_path, sa_path, sizeof rg->sa_path - 1);
+	rg->is_meth = is_meth;
+	/* A methylated index (<prefix>.meth.mbw) maps only in --meth mode; a normal
+	 * index handles SR/PE, Hi-C and long-read (all use the classic BWT) but not
+	 * meth, which needs the converted .meth.mbw. */
+	rg->mode_mask = is_meth ? MB_MODE_METH : (MB_MODE_SRPE | MB_MODE_HIC | MB_MODE_LR);
+	snprintf(rg->name, sizeof rg->name, "sa%u", 1U << sa_bit); // unsigned: sa_bit may be 31 (guarded <32), where signed 1<<31 overflows
+	if (sa_path) snprintf(rg->sa_path, sizeof rg->sa_path, "%s", sa_path); // caller rejects overlong paths first
 	else rg->sa_path[0] = '\0';
 }
 
@@ -105,32 +168,55 @@ static void fill_bwt_regime(mb_regime_t *rg, int sa_bit, uint64_t est_ram, const
  * reachable option.
  * b2_available is accepted for forward compatibility with M3's cp_occ
  * regimes; nothing is discovered for it in M2. */
-int mb_regime_discover(const char *prefix, int b2_available, mb_regime_t *out, int max){
+int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_regime_t *out, int max){
 	char fn_l2b[1152], fn_mbw[1152];
 	struct stat st_l2b, st_mbw;
 	uint32_t bundled_sa_bit;
-	uint64_t l2b_size, mbw_size;
+	uint64_t l2b_size, mbw_size, seq_len, bundled_sa_bytes, bwt_portion;
 	int n = 0;
 
 	if (!prefix || !out || max <= 0) return 0;
 
+	/* A methylated index lives at <prefix>.meth.mbw (built by `index --meth`); the
+	 * .l2b is shared with the normal index. Multi-density -u is rejected together
+	 * with --meth at index time, so a meth index is always a single bundled
+	 * regime -- no .sa.u* sidecars to enumerate. */
 	snprintf(fn_l2b, sizeof fn_l2b, "%s.l2b", prefix);
-	snprintf(fn_mbw, sizeof fn_mbw, "%s.mbw", prefix);
+	snprintf(fn_mbw, sizeof fn_mbw, is_meth? "%s.meth.mbw" : "%s.mbw", prefix);
 
 	if (stat(fn_l2b, &st_l2b) != 0 || stat(fn_mbw, &st_mbw) != 0) return 0;
 	if (read_u32_at(fn_mbw, 4, &bundled_sa_bit) != 0) return 0;
+	/* Reject an out-of-range bundled sa_bit before it reaches the 1U<<sa_bit /
+	 * 1ULL<<sa_bit shifts below (naming, RAM estimate): >=32 exceeds any density
+	 * the sampler produces, and the 32-bit `1U<<sa_bit` naming shift is undefined
+	 * at >=32 (the `1ULL<<` RAM math holds to 63). The sentinel (uint32_t)-1 is
+	 * >=32, so a bundled .mbw with no SA is rejected here too. */
+	if (bundled_sa_bit >= 32) return 0;
+	/* .mbw header: magic[4], sa_bit u32 @4, primary u64 @8, L2[1..4] 4*u64 @16
+	 * -- L2[4] (== seq_len) is at offset 16 + 3*8 = 40. */
+	if (read_u64_at(fn_mbw, 40, &seq_len) != 0) return 0;
 
 	l2b_size = (uint64_t)st_l2b.st_size;
 	mbw_size = (uint64_t)st_mbw.st_size;
 
+	/* mbw_size already contains the bundled SA; subtract it out so every
+	 * regime's estimate is built from the same BWT-only base plus its own
+	 * SA footprint -- otherwise a sparser sidecar regime (smaller SA) would
+	 * be estimated as *larger* than the bundled (dense) regime, since
+	 * mbw_size's bundled SA would be double counted on top of it. */
+	bundled_sa_bytes = ((seq_len + (1ULL<<bundled_sa_bit)) >> bundled_sa_bit) * 8;
+	bwt_portion = bundled_sa_bytes > mbw_size ? 0 : mbw_size - bundled_sa_bytes;
+
 	/* The bundled regime: its SA lives inside .mbw itself. */
 	if (n < max) {
-		fill_bwt_regime(&out[n], (int)bundled_sa_bit, l2b_size + mbw_size + MB_REGIME_MARGIN, NULL);
+		fill_bwt_regime(&out[n], (int)bundled_sa_bit,
+			est_ram_for(l2b_size, bwt_portion, seq_len, (int)bundled_sa_bit), NULL, is_meth);
 		n++;
 	}
 
-	/* Sidecar regimes: <prefix>.sa.u* */
-	{
+	/* Sidecar regimes: <prefix>.sa.u* -- only for a normal index. A meth index
+	 * never has sidecars (multi-density -u is rejected with --meth). */
+	if (!is_meth) {
 		char pattern[1152];
 		glob_t gl;
 		snprintf(pattern, sizeof pattern, "%s.sa.u*", prefix);
@@ -141,11 +227,22 @@ int mb_regime_discover(const char *prefix, int b2_available, mb_regime_t *out, i
 				const char *side = gl.gl_pathv[i];
 				struct stat st_side;
 				uint32_t side_sa_bit;
-				if (stat(side, &st_side) != 0) continue;
+				if (stat(side, &st_side) != 0) continue; /* validates the sidecar exists/is readable */
+				/* A path that would not fit mb_regime_t.sa_path is unusable: it
+				 * would be truncated before mb_bwt_load_sa() could open it, so
+				 * skip it explicitly rather than register a silently broken
+				 * regime. (The base .mbw path is built dynamically at load, so
+				 * long prefixes still work for the bundled regime.) */
+				if (strlen(side) >= sizeof out[n].sa_path) {
+					if (kom_verbose >= 2)
+						fprintf(stderr, "[W::mb_regime_discover] sidecar path too long, skipping: %s\n", side);
+					continue;
+				}
 				if (read_u32_at(side, 4, &side_sa_bit) != 0) continue;
+				if (side_sa_bit >= 32) continue; /* corrupt sidecar header: guards 1U<<sa_bit below */
 				if (side_sa_bit == bundled_sa_bit) continue; /* de-dup: redundant with the bundled regime */
 				fill_bwt_regime(&out[n], (int)side_sa_bit,
-					l2b_size + mbw_size + (uint64_t)st_side.st_size + MB_REGIME_MARGIN, side);
+					est_ram_for(l2b_size, bwt_portion, seq_len, (int)side_sa_bit), side, is_meth);
 				n++;
 			}
 		}
@@ -175,10 +272,10 @@ void mb_regime_list_print(FILE *fp, const mb_regime_t *r, int n){
 		if (r[i].mode_mask & MB_MODE_LR)   strcat(modes, "lr,");
 		len = strlen(modes);
 		if (len > 0) modes[len-1] = '\0'; /* trim the trailing comma */
-		fprintf(fp, "%-10s %-8s 1/%-8d %12.2f %6d  %s\n",
+		fprintf(fp, "%-10s %-8s 1/%-8u %12.2f %6d  %s\n",
 			r[i].name,
 			r[i].backend == MB_BACKEND_BWT ? "bwt" : "cp_occ",
-			1 << r[i].sa_bit,
+			1U << r[i].sa_bit, // unsigned: sa_bit may be 31, where signed 1<<31 overflows
 			(double)r[i].est_ram / (double)(1ULL<<30),
 			r[i].speed_rank,
 			modes);

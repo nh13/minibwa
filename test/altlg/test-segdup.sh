@@ -80,6 +80,10 @@ CHRM_FA="$MDIR/test/chrM-human.fa.gz"
 CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
 CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
 if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
+    # Copy and index inside TMPD rather than beside the shared fixture (same reason as
+    # lib-baseline.sh): keeps the check hermetic, avoids racing another script indexing
+    # the same chrM, and leaves no untracked .mbw/.l2b in test/.
+    cp "$CHRM_FA" "$TMPD/chrM-ref.fa.gz"; CHRM_FA="$TMPD/chrM-ref.fa.gz"
     "$MINIBWA" index "$CHRM_FA" 2>/dev/null
     # SE: default vs seam-off must be byte-identical (no ALT anchors either way).
     "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-on.sam"

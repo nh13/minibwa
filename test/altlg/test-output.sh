@@ -170,6 +170,11 @@ CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
 sam_body() { mawk '$1!~/^@/{print}' "$1"; }
 
 if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
+    # Copy and index inside TMPD rather than beside the shared fixture (same reason as
+    # lib-baseline.sh): keeps the check hermetic, avoids racing another script indexing
+    # the same chrM, and leaves no untracked .mbw/.l2b in test/.
+    cp "$CHRM_FA" "$TMPD/chrM-ref.fa.gz"; CHRM_FA="$TMPD/chrM-ref.fa.gz"
+    "$MINIBWA" index "$CHRM_FA" 2>/dev/null
     "$MINIBWA" map --outn=5 "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-no-flag.sam"
     "$MINIBWA" map --outn=5 --alt-records "$CHRM_FA" "$CHRM_R1" 2>/dev/null > "$TMPD/chrM-se-with-flag.sam"
     [ -s "$TMPD/chrM-se-no-flag.sam" ] || fail "chrM SE baseline: empty output"

@@ -17,14 +17,21 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "FMI_search.h"     /* FMI_search, SMEM, CP_OCC, one_hot_mask_array,
+#include "fmi_seed_api.h"   /* FmiSeed, SMEM, CP_OCC, one_hot_mask_array,
                                CP_SHIFT/CP_MASK, _mm_countbits_64,
-                               get_sa_entries_prefetch, cp_occ_data/count_data */
+                               fmi_seed_open/close/cp_occ/count/sentinel/sa_prefetch */
+
+/* fmi_seed_api.h is a lean facade and does not pull in NEON intrinsics (unlike
+ * FMI_search.h, which drags simd_compat.h in transitively). b2_occ_sp_sz below
+ * uses raw NEON types/intrinsics on arm64, so include them directly here. */
+#if defined(__ARM_NEON) || defined(__aarch64__) || defined(APPLE_SILICON)
+#include <arm_neon.h>
+#endif
 
 /* ------------------------------- handle ----------------------------------- */
 
 struct mb_b2_t {
-    FMI_search    *fmi;
+    FmiSeed       *fmi;
     const CP_OCC  *cp_occ;
     const int64_t *count;     /* C() array, sentinel already folded in */
     int64_t        sentinel;  /* S^{-1}(0) */
@@ -282,8 +289,8 @@ extern "C" void mb_b2_sa_batch(void *km, void *b2_, int64_t n, uint64_t *a)
         sm[i].s = 1;
     }
     int64_t dummy = 0, id = 0;
-    b2->fmi->get_sa_entries_prefetch(sm.data(), coord.data(), &dummy, n,
-                                     /*max_occ=*/1, /*tid=*/0, id);
+    fmi_seed_sa_prefetch(b2->fmi, sm.data(), coord.data(), &dummy, n,
+                         /*max_occ=*/1, /*tid=*/0, &id);
     for (int64_t i = 0; i < n; i++) a[i] = (uint64_t)coord[i];
 }
 
@@ -292,11 +299,10 @@ extern "C" void mb_b2_sa_batch(void *km, void *b2_, int64_t n, uint64_t *a)
 extern "C" void *mb_b2_load(const char *prefix)
 {
     mb_b2_t *b2 = new mb_b2_t();
-    b2->fmi = new FMI_search(prefix);
-    b2->fmi->load_index();
-    b2->cp_occ   = (const CP_OCC *)b2->fmi->cp_occ_data();
-    b2->count    = b2->fmi->count_data();
-    b2->sentinel = b2->fmi->sentinel_index;
+    b2->fmi = fmi_seed_open(prefix);
+    b2->cp_occ   = fmi_seed_cp_occ(b2->fmi);
+    b2->count    = fmi_seed_count(b2->fmi);
+    b2->sentinel = fmi_seed_sentinel(b2->fmi);
     b2_build_cache(b2, 10);   /* match minibwa's mb_bwt_cache(bwt, 10) */
     return b2;
 }
@@ -305,6 +311,6 @@ extern "C" void mb_b2_destroy(void *b2_)
 {
     mb_b2_t *b2 = (mb_b2_t *)b2_;
     if (!b2) return;
-    delete b2->fmi;   /* frees cp_occ / sa_ms_byte / sa_ls_word */
+    fmi_seed_close(b2->fmi);   /* frees cp_occ / sa_ms_byte / sa_ls_word */
     delete b2;
 }

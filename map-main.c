@@ -346,6 +346,9 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
+	{ "index-regime", ko_required_argument, 316 },
+	{ "index-mem",    ko_required_argument, 317 },
+	{ "list-regimes", ko_no_argument,       318 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -403,6 +406,9 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -5               take the alignment with the smallest query position as primary\n");
 	fprintf(fp, "    -K NUM1[,NUM2]   process NUM1-NUM2 bp of query sequences in a batch [100m,1g]\n");
 	fprintf(fp, "    --mmap[=lite]    load the index via memory mapped files (slower mapping) []\n");
+	fprintf(fp, "    --index-regime=STR  force a specific on-disk SA regime (e.g. sa8, sa16) []\n");
+	fprintf(fp, "    --index-mem=NUM  cap the memory budget used to auto-select an SA regime []\n");
+	fprintf(fp, "    --list-regimes   list the SA regimes available in <in.idx> and exit\n");
 	fprintf(fp, "    --version        print version number\n");
 	fprintf(fp, "    --help           print this help message\n");
 	return fp == stdout? 0 : 1;
@@ -439,6 +445,9 @@ int main_map(int argc, char *argv[])
 	mb_idx_t *idx;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
+	const char *forced_regime = 0;
+	uint64_t index_mem_cap = 0;
+	int list_regimes = 0;
 	ketopt_t o = KETOPT_INIT;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 
@@ -512,6 +521,12 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
+		} else if (c == 316) { // --index-regime
+			forced_regime = o.arg;
+		} else if (c == 317) { // --index-mem
+			index_mem_cap = kom_parse_num(o.arg, 0);
+		} else if (c == 318) { // --list-regimes
+			list_regimes = 1;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -556,7 +571,18 @@ int main_map(int argc, char *argv[])
 		return usage_map(stderr, &mo);
 
 	is_meth = !!(mo.flag & MB_F_METH);
-	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
+	{
+		mb_regime_t rgs[16];
+		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
+		int nrg = mb_regime_discover(argv[o.ind], /*b2_available=*/0, rgs, 16);
+		if (list_regimes) { mb_regime_list_print(stdout, rgs, nrg); return 0; }
+		uint64_t budget = mb_mem_budget(index_mem_cap);
+		int pick = mb_regime_pick(rgs, nrg, budget, mode, forced_regime);
+		kom_assert(pick >= 0, "no index regime fits the memory budget (try --index-mem or build a sparser -u)");
+		fprintf(stderr, "[M::regime] selected '%s' (est %.1f GB; budget %.1f GB)\n",
+		        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
+		idx = mb_idx_load_regime(argv[o.ind], &rgs[pick], use_mmap, mmap_preload);
+	}
 	kom_assert(idx, "failed to load the index.");
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());

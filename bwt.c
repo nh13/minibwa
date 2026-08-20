@@ -650,29 +650,34 @@ mb_bwt_t *mb_bwt_load(const char *fn)
 
 	fp = fopen(fn, "rb");
 	if (fp == 0) return 0;
-	fread(magic, 1, 4, fp);
-	if (strncmp(magic, MB_MAGIC, 4) != 0) {
+	if (fread(magic, 1, 4, fp) != 4 || strncmp(magic, MB_MAGIC, 4) != 0) {
 		fclose(fp);
 		return 0;
 	}
 	bwt = mb_bwt_init();
-	fread(&bwt->sa_bit, 4, 1, fp);
-	fread(x, 8, 5, fp);
+	// Reject a header that ends short: x[4] (== seq_len) drives the data_len
+	// allocation below, so an indeterminate value would size a bogus malloc.
+	if (fread(&bwt->sa_bit, 4, 1, fp) != 1 || fread(x, 8, 5, fp) != 5) {
+		mb_bwt_destroy(bwt); fclose(fp); return NULL;
+	}
 	bwt->primary = x[0];
 	memcpy(&bwt->L2[1], &x[1], 32);
 	bwt->seq_len = bwt->L2[4];
 	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
 	bwt->data = kom_calloc(uint64_t, bwt->data_len);
 	read_huge(fp, bwt->data_len << 3, bwt->data);
-	fread(&bwt->n_sa, 8, 1, fp);
+	if (fread(&bwt->n_sa, 8, 1, fp) != 1) { mb_bwt_destroy(bwt); fclose(fp); return NULL; }
 	if (bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0) {
-		uint64_t expected_n_sa = (bwt->seq_len + (1ULL << bwt->sa_bit)) >> bwt->sa_bit;
+		uint64_t expected_n_sa;
+		if (bwt->sa_bit >= 32) { mb_bwt_destroy(bwt); fclose(fp); return NULL; } // corrupt: guards 1ULL<<sa_bit
+		expected_n_sa = (bwt->seq_len + (1ULL << bwt->sa_bit)) >> bwt->sa_bit;
 		if (bwt->n_sa != expected_n_sa) {
 			mb_bwt_destroy(bwt);
+			fclose(fp);
 			return NULL;
 		}
 		bwt->sa = kom_malloc(uint64_t, bwt->n_sa);
-		fread(bwt->sa, 8, bwt->n_sa, fp);
+		if (fread(bwt->sa, 8, bwt->n_sa, fp) != bwt->n_sa) { mb_bwt_destroy(bwt); fclose(fp); return NULL; }
 	}
 	fclose(fp);
 	return bwt;
@@ -693,18 +698,33 @@ int mb_bwt_save_sa(const char *fn, const mb_bwt_t *bwt)
 
 int mb_bwt_load_sa(mb_bwt_t *bwt, const char *fn)
 {
-	FILE *fp = fopen(fn, "rb");
-	char magic[4]; uint32_t sa_bit; uint64_t n_sa, expected;
+	FILE *fp;
+	char magic[4];
+	uint32_t sa_bit;
+	uint64_t n_sa, expected;
+	uint64_t *sa;
+
+	/* sidecar SA attaches only to heap-loaded BWTs (mb_bwt_load_nosa); an
+	 * mmap-loaded bwt->sa, if any, points into the mapped file and must
+	 * never be replaced/freed here, so refuse up front. */
+	if (bwt->mmap != 0) return -1;
+
+	fp = fopen(fn, "rb");
 	if (fp == 0) return -1;
 	if (fread(magic,1,4,fp)!=4 || strncmp(magic,MB_SA_MAGIC,4)!=0) { fclose(fp); return -1; }
-	fread(&sa_bit,4,1,fp); fread(&n_sa,8,1,fp);
+	if (fread(&sa_bit,4,1,fp)!=1 || fread(&n_sa,8,1,fp)!=1) { fclose(fp); return -1; }
+	// A sidecar must carry a real SA: reject the no-SA sentinel and any value
+	// outside the supported [0,32) range before the 1ULL<<sa_bit shift below
+	// (sa_bit>=64 would be undefined behaviour; >=32 exceeds what the SA sampler
+	// ever produces). The sentinel (uint32_t)-1 is itself >=32, so this catches it.
+	if (sa_bit == (uint32_t)-1 || sa_bit >= 32) { fclose(fp); return -1; }
 	expected = (bwt->seq_len + (1ULL<<sa_bit)) >> sa_bit;
-	if (sa_bit == (uint32_t)-1 || n_sa != expected) { fclose(fp); return -1; }
-	if (bwt->sa && bwt->mmap == 0) free(bwt->sa);   /* only free heap SA, never mmap'd */
-	bwt->sa_bit = sa_bit; bwt->n_sa = n_sa;
-	bwt->sa = kom_malloc(uint64_t, n_sa);
-	if (fread(bwt->sa, 8, n_sa, fp) != n_sa) { fclose(fp); return -1; }
+	if (n_sa != expected) { fclose(fp); return -1; }
+	sa = kom_malloc(uint64_t, n_sa);
+	if (fread(sa, 8, n_sa, fp) != n_sa) { free(sa); fclose(fp); return -1; } // short read: leave bwt untouched
 	fclose(fp);
+	if (bwt->sa) free(bwt->sa); // safe: mmap case already rejected above
+	bwt->sa_bit = sa_bit; bwt->n_sa = n_sa; bwt->sa = sa;
 	return 0;
 }
 
@@ -717,21 +737,25 @@ mb_bwt_t *mb_bwt_load_nosa(const char *fn)
 
 	fp = fopen(fn, "rb");
 	if (fp == 0) return 0;
-	fread(magic, 1, 4, fp);
-	if (strncmp(magic, MB_MAGIC, 4) != 0) {
+	if (fread(magic, 1, 4, fp) != 4 || strncmp(magic, MB_MAGIC, 4) != 0) {
 		fclose(fp);
 		return 0;
 	}
 	bwt = mb_bwt_init();
-	fread(&bwt->sa_bit, 4, 1, fp);
-	fread(x, 8, 5, fp);
+	// Reject a truncated header: x[4] (== seq_len) sizes the data allocation
+	// below, so a short read must not fall through to malloc on garbage.
+	if (fread(&bwt->sa_bit, 4, 1, fp) != 1 || fread(x, 8, 5, fp) != 5) {
+		mb_bwt_destroy(bwt); fclose(fp); return 0;
+	}
 	bwt->primary = x[0];
 	memcpy(&bwt->L2[1], &x[1], 32);
 	bwt->seq_len = bwt->L2[4];
 	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
 	bwt->data = kom_calloc(uint64_t, bwt->data_len);
 	read_huge(fp, bwt->data_len << 3, bwt->data);
-	fread(&bwt->n_sa, 8, 1, fp);
+	// n_sa is read for format completeness but discarded: this loader never
+	// attaches the bundled SA (sidecar SA is attached later via mb_bwt_load_sa).
+	if (fread(&bwt->n_sa, 8, 1, fp) != 1) { mb_bwt_destroy(bwt); fclose(fp); return 0; }
 	bwt->sa = 0; bwt->n_sa = 0; bwt->sa_bit = (uint32_t)-1;
 	fclose(fp);
 	return bwt;
@@ -752,6 +776,9 @@ mb_bwt_t *mb_bwt_load_mmap(const char *fn, int preload)
 	bwt->mmap = base;
 	bwt->mmap_len = map_len;
 	bwt->sa_bit = *(const uint32_t*)(base + 4);
+	// A non-sentinel sa_bit outside [0,32) is a corrupt header: reject it before
+	// the 1ULL<<sa_bit shift below (>=64 is UB). The sentinel means "no bundled SA".
+	if (bwt->sa_bit != (uint32_t)-1 && bwt->sa_bit >= 32) { mb_bwt_destroy(bwt); return 0; }
 	bwt->primary = *(const uint64_t*)(base + 8);
 	memcpy(&bwt->L2[1], base + 16, 32);
 	bwt->seq_len = bwt->L2[4];

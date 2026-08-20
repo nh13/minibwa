@@ -73,7 +73,7 @@ static void worker_for_se_batch(void *data, long i, int tid)
 		}
 	}
 	assert(p == n);
-	mb_seed_intv_batch(km, idx->bwt, n, len, seq, opt->min_len, opt->max_sub_occ, sai);
+	mb_seed_intv_batch(km, idx, n, len, seq, opt->min_len, opt->max_sub_occ, sai);
 	kfree(km, seq);
 	kfree(km, len);
 	kfree(km, buf);

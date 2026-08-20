@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
+#include <unistd.h>
 #include "libsais.h"
 #include "libsais64.h"
 #include "kommon.h"
@@ -270,10 +271,37 @@ static int usage_index(FILE *fp, uint64_t seed, int sa_bit, int n_thread)
 	return fp == stdout? 0 : 1;
 }
 
+// parse a comma-separated list of non-negative integers (e.g. "3,4,2") into sa_bits[],
+// capped at max_n values; empty tokens are skipped. Returns the number of values parsed,
+// or -1 on a malformed (non-numeric) token.
+static int parse_sa_bits(const char *arg, int *sa_bits, int max_n)
+{
+	const char *p = arg;
+	int n = 0;
+	while (*p && n < max_n) {
+		char *end;
+		long v;
+		if (*p == ',') { ++p; continue; } // skip empty tokens, e.g. "3,,4"
+		v = strtol(p, &end, 10);
+		if (end == p) return -1; // no digits consumed: malformed token
+		sa_bits[n++] = (int)v;
+		p = end;
+		if (*p == ',') ++p;
+		else if (*p != '\0') return -1; // junk after the number
+	}
+	return n;
+}
+
+static int cmp_int(const void *a, const void *b)
+{
+	return *(const int*)a - *(const int*)b;
+}
+
 int main_index(int argc, char *argv[])
 {
 	ketopt_t o = KETOPT_INIT;
-	int c, low_mem = 0, n_thread = 4, sa_bit = 4, is_meth = 0;
+	int c, low_mem = 0, n_thread = 4, is_meth = 0;
+	int sa_bits[8], n_sa_bits = 0;
 	int64_t block_size = 10000000;
 	uint64_t seed = 11;
 	char *prefix, *fn_l2b, *fn_bwt, *fn_meth_bwt = 0;
@@ -284,12 +312,24 @@ int main_index(int argc, char *argv[])
 		if (c == 't') n_thread = atoi(o.arg);
 		else if (c == 'l') low_mem = 1;
 		else if (c == 'b') block_size = kom_parse_num(o.arg, 0);
-		else if (c == 'u') sa_bit = atoi(o.arg);
+		else if (c == 'u') {
+			n_sa_bits = parse_sa_bits(o.arg, sa_bits, 8);
+			if (n_sa_bits <= 0) {
+				fprintf(stderr, "ERROR: -u expects a comma-separated list of non-negative integers (e.g. -u 3,4), got \"%s\"\n", o.arg);
+				return 1;
+			}
+		}
 		else if (c == 's') seed = atol(o.arg);
-		else if (c == 901) return usage_index(stdout, seed, sa_bit, n_thread);
+		else if (c == 901) return usage_index(stdout, seed, n_sa_bits? sa_bits[0] : 3, n_thread);
 		else if (c == 902) is_meth = 1;
 	}
-	if (argc - o.ind == 0) return usage_index(stderr, seed, sa_bit, n_thread);
+	if (n_sa_bits == 0) { sa_bits[0] = 3; n_sa_bits = 1; } // default when -u is absent
+	qsort(sa_bits, n_sa_bits, sizeof(int), cmp_int); // ascending: sa_bits[0] is densest (smallest sa_bit) -> bundled in .mbw
+	if (n_sa_bits > 1 && is_meth) {
+		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with --meth\n");
+		return 1;
+	}
+	if (argc - o.ind == 0) return usage_index(stderr, seed, sa_bits[0], n_thread);
 
 	prefix = o.ind + 1 < argc? argv[o.ind+1] : argv[o.ind];
 	fn_l2b = kom_calloc(char, strlen(prefix) + 10);
@@ -309,7 +349,7 @@ int main_index(int argc, char *argv[])
 		mb_bwtgen(fn_l2b, fn_bwt, block_size);
 		l2b_save(fn_l2b, l2b);
 		bwt = mb_bwt_load_raw(fn_bwt);
-		mb_bwt_gen_sa(bwt, sa_bit);
+		mb_bwt_gen_sa(bwt, sa_bits[0]);
 		mb_bwt_save(fn_bwt, bwt);
 		mb_bwt_destroy(bwt);
 		if (is_meth) {
@@ -317,7 +357,7 @@ int main_index(int argc, char *argv[])
 			mb_bwtgen(fn_l2b, fn_meth_bwt, block_size);
 			l2b_save(fn_l2b, l2b); // restore the real .l2b; the meth pac above overwrote it (cf. the regular pass)
 			bwt = mb_bwt_load_raw(fn_meth_bwt);
-			mb_bwt_gen_sa(bwt, sa_bit);
+			mb_bwt_gen_sa(bwt, sa_bits[0]);
 			mb_bwt_save(fn_meth_bwt, bwt);
 			mb_bwt_destroy(bwt);
 		}
@@ -326,12 +366,27 @@ int main_index(int argc, char *argv[])
 		abort();
 #endif
 	} else {
+		int reused, i;
 		l2b_save(fn_l2b, l2b);
-		bwt = mb_bwt_libsais(l2b, sa_bit, 1, 0, n_thread);
-		mb_bwt_save(fn_bwt, bwt);
+		// incremental: reuse an existing .mbw if present (BWT not rebuilt), else build from scratch
+		reused = (access(fn_bwt, R_OK) == 0);
+		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
+		if (bwt == NULL) { bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread); reused = 0; }
+		if (!reused) { // fresh build: densest requested density is bundled into the .mbw
+			mb_bwt_gen_sa(bwt, sa_bits[0]);
+			mb_bwt_save(fn_bwt, bwt);
+		}
+		// on an incremental run the .mbw's bundled density is fixed and left untouched, so every
+		// requested density becomes a sidecar; on a fresh build only sa_bits[1..] do (sa_bits[0] is bundled above)
+		for (i = reused? 0 : 1; i < n_sa_bits; ++i) {
+			char side[1024];
+			snprintf(side, sizeof side, "%s.sa.u%d", prefix, sa_bits[i]);
+			mb_bwt_gen_sa(bwt, sa_bits[i]);
+			mb_bwt_save_sa(side, bwt);
+		}
 		mb_bwt_destroy(bwt);
 		if (is_meth) {
-			bwt = mb_bwt_libsais(l2b, sa_bit, 1, 1, n_thread);
+			bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 1, n_thread);
 			mb_bwt_save(fn_meth_bwt, bwt);
 			mb_bwt_destroy(bwt);
 		}

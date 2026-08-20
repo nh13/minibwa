@@ -108,6 +108,26 @@ ifeq ($(B2),1)
 endif
 # ===========================================================================
 
+# ===================== build-mode guard =====================================
+# LOBJS/AOBJS/main.o are compiled with $(CPPFLAGS), which gains -DMB_HAVE_B2
+# only under B2=1. The object names do not encode that flag, so toggling
+# `make` <-> `make B2=1` without `make clean` would reuse stale objects and
+# silently drop the cp_occ backend (the binary still links and runs, just with
+# no sa*-b2 regime). Record the current mode in a stamp file, rewritten only
+# when the mode actually changes; every $(CPPFLAGS) object depends on it, so a
+# mode flip refreshes the stamp's mtime and forces those objects to recompile.
+# force_build_mode is the first target rule in the file; without an explicit
+# default goal, GNU make would otherwise silently adopt it as the thing a
+# bare `make`/`make B2=1` builds instead of `all`.
+.DEFAULT_GOAL := all
+BUILD_MODE := $(if $(filter 1,$(B2)),b2,native)
+.PHONY: force_build_mode
+force_build_mode:
+.build-mode: force_build_mode
+	@[ "$$(cat $@ 2>/dev/null)" = "$(BUILD_MODE)" ] || echo "$(BUILD_MODE)" > $@
+$(LOBJS) $(AOBJS) main.o: .build-mode
+# ===========================================================================
+
 .SUFFIXES:.c .o
 .PHONY:all clean depend
 
@@ -129,7 +149,7 @@ minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o
 		$(LINK) $(LINK_FLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o -o $@ -L. -lminibwa $(LIBS) $(B3_LDLIBS)
 
 clean:
-		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM
+		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM .build-mode
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CFLAGS) $(DFLAGS) -- *.c *.cpp)

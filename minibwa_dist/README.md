@@ -88,8 +88,21 @@ The gate is the only thing standing between a replayed-but-now-wrong conflict re
 silently different aligner. Declaring `identical` and being wrong will fail the build, which is the
 intended outcome.
 
-Note what is **not** covered: the *positive* path of a `conditional` feature. Those change output
-on purpose, so byte-identity says nothing about them; they rely on each feature branch's own tests.
+The comparison runs once per entry in `gates._MODES` — currently five: default flags, `-u`,
+`-b MD`, `--eqx`, and a single-end run. One paired default run leaves most of `format.c`
+unexercised, and `format.c` is what downstream churns hardest, so a resolution there can be
+textually plausible, semantically wrong, and still pass a single-invocation gate.
+
+Adding a mode has one rule: **it must change stock's output on the chrM fixture.** The
+`modes-are-distinct` gate enforces it, so a no-op flag fails the build instead of inflating the
+coverage claim. Two candidates were rejected on that test — `-a`, which in `map` only clears
+`MB_F_PAF` and so does nothing given SAM is already the default, and `--outn`/`--outs`/`-N`,
+because this fixture yields no secondary alignments. Secondary-record emission is therefore
+**not** covered and cannot be without a new fixture.
+
+Note what else is **not** covered: the *positive* path of a `conditional` feature. Those change
+output on purpose, so byte-identity says nothing about them; they rely on each feature branch's
+own tests.
 
 ## `upstream.status` — six values, each with consequences
 

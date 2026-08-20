@@ -70,6 +70,36 @@ def conflicting_branch(repo: Path, branch: str) -> None:
     commit_file(repo, "src.c", "line1\nUPSTREAM\n", "upstream edits line2")
 
 
+def stub_aligner(path: Path, sam: str) -> Path:
+    """A `minibwa` stand-in: `index` succeeds, `map` prints `sam` plus a flag line.
+
+    The comparison step -- the single property the gates exist for -- is
+    unreachable without two aligners. It does not need two *real* ones.
+
+    The trailing flag line makes output vary with the flags, which a real
+    aligner's does and `gates._modes_are_distinct` requires: a stub that ignored
+    its flags would look like a list of no-op modes and fail that gate. It is a
+    plain record line, not `@CO`, so the digest counts it.
+
+    It echoes only the DASHED arguments and a positional count, never the paths.
+    Stock and candidate run in different workdirs, so echoing `"$*"` would make
+    every mode differ between them and fail identity over a path difference.
+
+    Lives here because two test modules need it and the script is subtle enough
+    that two copies would drift.
+    """
+    path.write_text(
+        '#!/bin/sh\nif [ "$1" = "index" ]; then exit 0; fi\ncat <<\'SAM\'\n'
+        + sam
+        + "SAM\n"
+        + 'flags=""; n=0\n'
+        'for a in "$@"; do case "$a" in -*) flags="$flags $a" ;; *) n=$((n+1)) ;; esac; done\n'
+        'printf \'mode\\t%s\\t%s\\n\' "$flags" "$n"\n'
+    )
+    path.chmod(0o755)
+    return path
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """An initialised repo on `master` with a two-line base file."""

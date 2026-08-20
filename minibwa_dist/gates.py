@@ -21,6 +21,48 @@ from minibwa_dist.manifest import Manifest
 # line -- @HD, @SQ, @RG -- is real output and a change in it is a regression.
 _EXEMPT_HEADERS = (b"@PG", b"@CO")
 
+# One entry per gated invocation: a label, the flags added after `map`, and
+# whether the second read file is passed. `default-flags` comes first and is the
+# invocation `default-flags-byte-identity` is named for -- it is also the only one
+# whose detail carries the feature coverage list, so the other three do not repeat
+# a fourteen-name list in the CI log.
+#
+# The extra four exist because one default paired run leaves most of `format.c`
+# unexercised, and `format.c` is the file downstream churns hardest: resolving
+# `inline-appenders` required rewriting upstream's new mate-unmapped `r_pri` logic
+# in appender style rather than picking a side, which is precisely the shape of
+# resolution rerere can replay as textually plausible and semantically wrong. `-u`
+# reaches unmapped-record suppression, `-b MD` reaches tag emission, `--eqx`
+# reaches CIGAR construction, and the single-end run reaches the unpaired paths a
+# paired-only comparison never enters. All are upstream flags with no downstream
+# feature enabled, so the `identical` contract binds on every one of them.
+#
+# Every entry is verified to CHANGE the output on upstream's chrM fixture -- a
+# mode whose SAM matches the default one is a second copy of the default gate
+# wearing a different name. Two candidates were rejected on exactly that test:
+# `-a`, which in `map` is only `flag &= ~MB_F_PAF` and so is a no-op because SAM
+# is already the default (it means all-hits in the OTHER subcommand, which is
+# where the habit comes from), and `--outn`/`--outs`/`-N`, because this fixture
+# produces no secondary alignments for them to emit. Secondary-record emission is
+# therefore NOT covered here, and cannot be without a new fixture.
+_MODES: tuple[tuple[str, tuple[str, ...], bool], ...] = (
+    ("default-flags", (), True),
+    ("no-unmapped", ("-u",), True),
+    ("base-tag", ("-b", "MD"), True),
+    ("eqx-cigar", ("--eqx",), True),
+    ("single-end", (), False),
+)
+
+
+def _gate_name(label: str) -> str:
+    """Gate name for a mode label.
+
+    `default-flags-byte-identity` is load-bearing text: the runbook and the
+    release notes name it, so it keeps its spelling rather than becoming
+    `byte-identity:default-flags` for symmetry.
+    """
+    return "default-flags-byte-identity" if label == "default-flags" else f"byte-identity:{label}"
+
 
 @dataclass(frozen=True)
 class GateResult:
@@ -41,8 +83,11 @@ def sam_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def align_fixture(binary: Path, fixture_dir: Path, workdir: Path) -> Path:
-    """Index the chrM fixture with `binary` and align the read pair with it.
+def align_fixture(binary: Path, fixture_dir: Path, workdir: Path) -> dict[str, Path]:
+    """Index the chrM fixture with `binary` and align it once per `_MODES` entry.
+
+    Returns the SAM path for each mode label. One index serves every mode: the
+    index is a function of the reference and the binary, not of the mapping flags.
 
     `minibwa map` takes an index, not a FASTA, so the index is built here -- with
     the SAME binary under test, never shared between stock and candidate, so an
@@ -63,21 +108,51 @@ def align_fixture(binary: Path, fixture_dir: Path, workdir: Path) -> Path:
         stderr=subprocess.DEVNULL,
         check=True,
     )
-    out = workdir / "aln.sam"
-    with out.open("w") as handle:
-        subprocess.run(
-            [
-                str(binary),
-                "map",
-                str(prefix),
-                str(fixture_dir / "chrM-read_1.fa.gz"),
-                str(fixture_dir / "chrM-read_2.fa.gz"),
-            ],
-            stdout=handle,
-            stderr=subprocess.DEVNULL,
-            check=True,
+    reads = [str(fixture_dir / "chrM-read_1.fa.gz"), str(fixture_dir / "chrM-read_2.fa.gz")]
+    sams: dict[str, Path] = {}
+    for label, flags, paired in _MODES:
+        out = workdir / f"aln.{label}.sam"
+        with out.open("w") as handle:
+            subprocess.run(
+                [str(binary), "map", *flags, str(prefix), *(reads if paired else reads[:1])],
+                stdout=handle,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+        sams[label] = out
+    return sams
+
+
+def _modes_are_distinct(stock_digests: dict[str, str]) -> GateResult:
+    """Assert every `_MODES` entry actually changes stock's output.
+
+    A mode whose SAM equals another mode's is not a second gate, it is the same
+    gate reported twice -- the coverage claim inflates while the evidence does
+    not. This fires on the STOCK digests, so it is a property of the mode list and
+    upstream's fixture alone; a candidate regression cannot mask it, and cannot
+    trigger it either.
+
+    It exists because `-a` was very nearly added as a mode: in `map` it is only
+    `flag &= ~MB_F_PAF`, a no-op given SAM is the default, and it was caught by
+    running the comparison by hand rather than by anything in this file. The same
+    check now runs on every sync, on both architectures.
+    """
+    by_digest: dict[str, list[str]] = {}
+    for label, digest in stock_digests.items():
+        by_digest.setdefault(digest, []).append(label)
+    duplicates = [labels for labels in by_digest.values() if len(labels) > 1]
+    if duplicates:
+        groups = "; ".join(" == ".join(labels) for labels in duplicates)
+        return GateResult(
+            name="modes-are-distinct",
+            passed=False,
+            detail=f"redundant mode(s) -- identical stock output: {groups}",
         )
-    return out
+    return GateResult(
+        name="modes-are-distinct",
+        passed=True,
+        detail=f"{len(stock_digests)} mode(s), each with distinct stock output",
+    )
 
 
 def run_gates(
@@ -90,9 +165,10 @@ def run_gates(
 ) -> list[GateResult]:
     """Run every gate implied by the manifest.
 
-    One default-flags comparison covers all `identical` features and the NEGATIVE
-    case of every `conditional` feature at once: with no feature flag set and a
-    reference carrying no ALT contigs, none of them may alter a single record.
+    The comparisons cover all `identical` features and the NEGATIVE case of every
+    `conditional` feature at once: with no feature flag set and a reference
+    carrying no ALT contigs, none of them may alter a single record -- under any
+    of the four upstream invocations in `_MODES`, not merely the default one.
 
     `merged` names the features the candidate binary actually contains --
     `AssemblyResult.merged`. Optional features drop out routinely, and a gate
@@ -113,8 +189,8 @@ def run_gates(
 
     results: list[GateResult] = []
     try:
-        stock = sam_digest(align_fixture(stock_bin, fixture_dir, workdir / "stock"))
-        cand = sam_digest(align_fixture(candidate_bin, fixture_dir, workdir / "cand"))
+        stock_sams = align_fixture(stock_bin, fixture_dir, workdir / "stock")
+        cand_sams = align_fixture(candidate_bin, fixture_dir, workdir / "cand")
     except (subprocess.CalledProcessError, OSError) as exc:
         results.append(
             GateResult(
@@ -127,21 +203,31 @@ def run_gates(
         gated = [f.name for f in manifest.features if f.output in ("identical", "conditional")]
         covered = [name for name in gated if in_build(name)]
         excluded = [name for name in gated if not in_build(name)]
-        detail = f"{len(covered)} feature(s) covered: {', '.join(covered)}"
+        coverage = f"{len(covered)} feature(s) covered: {', '.join(covered)}"
         if excluded:
-            detail += f"; {len(excluded)} not in this build: {', '.join(excluded)}"
-        passed = stock == cand
-        results.append(
-            GateResult(
-                name="default-flags-byte-identity",
-                passed=passed,
-                detail=(
-                    detail
-                    if passed
-                    else f"SAM differs: stock {stock[:12]} vs candidate {cand[:12]}"
-                ),
+            coverage += f"; {len(excluded)} not in this build: {', '.join(excluded)}"
+        stock_digests = {label: sam_digest(stock_sams[label]) for label, _, _ in _MODES}
+        results.append(_modes_are_distinct(stock_digests))
+        for label, flags, paired in _MODES:
+            stock = stock_digests[label]
+            cand = sam_digest(cand_sams[label])
+            passed = stock == cand
+            invocation = " ".join(("map", *flags)) + (" (paired)" if paired else " (single-end)")
+            results.append(
+                GateResult(
+                    name=_gate_name(label),
+                    passed=passed,
+                    # Only the default-flags gate reports coverage; repeating a
+                    # fourteen-name list four times buries the one line that
+                    # differs when a mode fails.
+                    detail=(
+                        (coverage if label == "default-flags" else invocation)
+                        if passed
+                        else f"SAM differs under `{invocation}`: "
+                        f"stock {stock[:12]} vs candidate {cand[:12]}"
+                    ),
+                )
             )
-        )
 
     for feature in manifest.features:
         # A dropped changes-output feature is not in the binary, so it has

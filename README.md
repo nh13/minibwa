@@ -15,7 +15,6 @@
 | feature | upstream | status | output | summary |
 |---|---|---|---|---|
 | `ops-distro` | — | unsubmitted | identical | distribution manifest, assembly engine and workflows |
-| `cli-exit-status` | [lh3/minibwa#67](https://github.com/lh3/minibwa/pull/67) | open | identical | return the subcommand exit status from main() instead of always 0 |
 | `ll-affine-reassoc` | [lh3/minibwa#37](https://github.com/lh3/minibwa/pull/37) | rejected | identical | reassociate the affine-gap recurrence in ksw2_ll for arm64 |
 | `ksw2-extension-kernels` | [lh3/minibwa#64](https://github.com/lh3/minibwa/pull/64) | open | identical | shuffle-LUT prepass, one-vext rail shift, 16-wide exact-max and NEON BIT direction bytes in ksw2_extd2/extz2; +11% HiFi and +10% ONT on arm64, +7% on x86 |
 | `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two; 0.67-1.24 pp whole-stack ladder increment |

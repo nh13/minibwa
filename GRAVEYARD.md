@@ -21,7 +21,7 @@ AUC flat at -2.6e-5 and strictly dominated by raising the mapQ threshold: unpatc
 - **Branch:** `perf/rescue-window-gate`
 - **Report:** `reports/2026-08-01-mate-rescue-window-gate.md`
 
-Large speedups (-5.5% WGS, -44.9% Hi-C) but every ablation level moves confident placements on real data (WGS L4: 1 in 4,300 at MAPQ>=10). The simulated ROC that passed was the wrong experiment. The Hi-C result survives as a different idea: skip rescue when the insert-size distribution is uninformative.
+Large speedups (-5.5% WGS, -44.9% Hi-C) but every ablation level moves confident placements on real data (WGS L4: 1 in 4,300 at MAPQ>=10). The simulated ROC that passed was the wrong experiment. The Hi-C half is void too: that arm ran without --hic, which already skips all mate rescue, so it timed a configuration nobody should use for the assay (5.9-7.9x on 100k HG002 pairs; proper-paired 88,411 -> 0). The idea it was said to leave behind -- skip rescue when the insert-size distribution is uninformative -- is already implemented twice: --hic for the whole assay, and the per-read futility gate at pe.c:358, whose constants (10, 0.33) match bwa-mem3's --rescue-skip. See reports/2026-08-08-hic-mate-rescue-futility.md.
 
 ## `pe-encode-vectorize`
 

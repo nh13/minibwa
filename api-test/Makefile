@@ -1,6 +1,6 @@
 CC=			gcc
 CFLAGS=		-std=gnu99 -Wall -O3
-EXE=		mbmap-one mbmap-batch ex-lift-check ex-place-check ex-group-check
+EXE=		mbmap-one mbmap-batch
 
 # libminibwa.a may contain OpenMP code (parallel BWT construction), so the
 # example programs must link the OpenMP runtime. Mirror the parent Makefile's
@@ -30,15 +30,6 @@ mbmap-one:ex-one.c ../libminibwa.a
 	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 mbmap-batch:ex-batch.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
-
-ex-lift-check:ex-lift-check.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
-
-ex-place-check:ex-place-check.c ../libminibwa.a
-	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
-
-ex-group-check:ex-group-check.c ../libminibwa.a
 	$(CC) $(CFLAGS) -o $@ -I.. $^ -lz -lm $(LIBS)
 
 clean:

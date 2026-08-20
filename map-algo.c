@@ -36,9 +36,6 @@ mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth)
 	mb_bwt_cache(bwt, 10); // TODO: don't hard code this
 	idx = kom_calloc(mb_idx_t, 1);
 	idx->is_meth = !!is_meth, idx->l2b = l2b, idx->bwt = bwt;
-	/* Auto-detect <prefix>.alt; silently skip if absent. */
-	strcat(strcpy(buf, prefix), ".alt");
-	l2b_set_alt(l2b, buf); /* returns -1 (ENOENT) if absent — ignore */
 end_idx_load:
 	free(buf);
 	return idx;
@@ -67,198 +64,6 @@ mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload)
 end_idx_load_mmap:
 	free(buf);
 	return idx;
-}
-
-void mb_idx_set_alt(mb_idx_t *idx, const char *fn)
-{
-	if (idx && idx->l2b) l2b_set_alt(idx->l2b, fn);
-}
-
-/* Reference (target) span the hit's CIGAR consumes, as a half-open interval on
- * h->tid.  Post-DP (h->p != NULL) this walks the CIGAR's reference-consuming ops
- * (M/=/X/D/N) starting at h->ts; pre-DP (h->p == NULL) it falls back to the
- * coarse chain interval [ts,te).  Either way the footprint starts at h->ts. */
-static void mb_hit_footprint(const mb_hit_t *h, int64_t *fp_st, int64_t *fp_en)
-{
-	*fp_st = h->ts;
-	if (h->p != 0 && h->p->n_cigar > 0) {
-		int64_t pos = h->ts;
-		int32_t k;
-		for (k = 0; k < h->p->n_cigar; ++k) {
-			uint32_t op = h->p->cigar[k] & 0xf, len = h->p->cigar[k] >> 4;
-			if (op == MB_CIGAR_MATCH || op == MB_CIGAR_EQ_MATCH || op == MB_CIGAR_X_MISMATCH ||
-			    op == MB_CIGAR_DEL || op == MB_CIGAR_N_SKIP)
-				pos += len;
-		}
-		*fp_en = pos;
-	} else {
-		*fp_en = h->te;
-	}
-	if (*fp_en <= *fp_st) *fp_en = *fp_st + 1; /* guard against a degenerate span */
-}
-
-mb_place_t mb_hit_place(const l2b_t *l2b, const mb_hit_t *h)
-{
-	mb_place_t pl;
-	int64_t fp_st, fp_en;
-	const l2b_ctg_t *ctg;
-	uint32_t b;
-	int64_t en = 0;             /* max over lifted PRIMARY outputs (cosmetic lifted_en) */
-
-	mb_hit_footprint(h, &fp_st, &fp_en);
-
-	/* Non-ALT hit (or no .alt loaded / no lift blocks): identity passthrough.
-	 * One sub-placement at the hit's own position; representative fields are
-	 * byte-identical to the pre-multi-interval baseline so non-ALT grouping is
-	 * unchanged. */
-	if (!h->is_alt || h->tid < 0 || h->tid >= (int64_t)l2b->n_ctg ||
-	    !l2b->ctg[h->tid].is_alt || l2b->ctg[h->tid].n_lift == 0) {
-		pl.pri_tid          = h->tid;
-		pl.lifted_st        = fp_st;
-		pl.lifted_en        = fp_en;
-		pl.rev              = h->rev;
-		pl.liftable         = 1;
-		pl.n_subpl          = 1;
-		pl.subpl[0].st      = fp_st;
-		pl.subpl[0].pri_tid = h->tid;
-		pl.subpl[0].rev     = h->rev;
-		return pl;
-	}
-
-	/* ALT hit: lift the footprint through the .alt span-lift.  We walk the lift
-	 * blocks: a reverse block maps alt_st to the HIGH primary coordinate (not the
-	 * low one), and the footprint may begin/end in a hole (a gap between blocks).
-	 * Rather than min/max-COLLAPSING every overlapping block into a single span
-	 * (which inflates the placement by an SV-scale indel and drags the grouping
-	 * key thousands of bp from a breakpoint-spanning twin), we record ONE
-	 * sub-placement per overlapping block: subpl[k].st is that block's
-	 * representative (min) lifted primary coordinate.  A breakpoint-spanning ALT
-	 * hit thus keeps a sub-interval AT each side of the breakpoint, so it can
-	 * still co-locate with its primary twin via the matching one.  Each block
-	 * carries its OWN (pri_tid, rev): a multi-contig/mixed-strand ALT scaffold
-	 * (which the old single-interval code flagged liftable=0 and dropped) now
-	 * yields per-block sub-placements that co-locate only with a primary hit
-	 * sharing that block's (pri_tid, rev) -- safe, and strictly more recoverable. */
-	ctg = &l2b->ctg[h->tid];
-	pl.n_subpl = 0;
-	for (b = 0; b < ctg->n_lift; ++b) {
-		const l2b_lift_t *blk = &ctg->lift[b];
-		int64_t a_lo, a_hi;       /* clamped ALT endpoints inside the footprint */
-		int64_t p0, p1, blk_st;
-		int64_t pt0, pt1; uint64_t pp0, pp1; uint8_t rv0, rv1;
-		uint8_t blk_rev;
-
-		if ((int64_t)blk->alt_en <= fp_st || (int64_t)blk->alt_st >= fp_en)
-			continue;             /* block does not overlap the footprint */
-		a_lo = (int64_t)blk->alt_st > fp_st ? (int64_t)blk->alt_st : fp_st;
-		a_hi = (int64_t)blk->alt_en < fp_en ? (int64_t)blk->alt_en : fp_en;
-		a_hi -= 1;                /* inclusive last liftable ALT base in this block */
-		if (a_hi < a_lo) continue;
-
-		if (!l2b_lift(l2b, h->tid, (uint64_t)a_lo, &pt0, &pp0, &rv0)) continue;
-		if (!l2b_lift(l2b, h->tid, (uint64_t)a_hi, &pt1, &pp1, &rv1)) continue;
-		p0 = (int64_t)pp0; p1 = (int64_t)pp1;
-		blk_st = p0 < p1 ? p0 : p1;   /* block's representative (min) lifted start */
-
-		/* MB_MAX_SUBPL spill: a footprint over a normal .alt CIGAR overlaps only a
-		 * couple of blocks, but a pathologically fragmented region could exceed the
-		 * cap.  Keep the FIRST MB_MAX_SUBPL blocks and drop the rest.  Dropping a
-		 * candidate sub-interval can only REMOVE a possible co-location, never add a
-		 * spurious one, so the cap is safe for paralog isolation. */
-		if (pl.n_subpl >= MB_MAX_SUBPL) break;
-
-		blk_rev = (uint8_t)(rv0 ^ h->rev);
-		pl.subpl[pl.n_subpl].st      = blk_st;
-		pl.subpl[pl.n_subpl].pri_tid = pt0;
-		pl.subpl[pl.n_subpl].rev     = blk_rev;
-		++pl.n_subpl;
-
-		/* Track the max lifted primary coordinate for the cosmetic lifted_en. */
-		if (pl.n_subpl == 1) en = blk_st;
-		if (p0 > en) en = p0;
-		if (p1 > en) en = p1;
-	}
-
-	if (pl.n_subpl == 0) {
-		/* Entire footprint falls in holes -> ALT-specific; own group. */
-		pl.pri_tid   = h->tid;
-		pl.lifted_st = fp_st;
-		pl.lifted_en = fp_en;
-		pl.rev       = h->rev;
-		pl.liftable  = 0;
-		return pl;
-	}
-
-	/* Representative fields come from subpl[0] (back-compat); lifted_en is the max
-	 * over sub-placements (cosmetic -- no decision reads it). */
-	pl.pri_tid   = pl.subpl[0].pri_tid;
-	pl.lifted_st = pl.subpl[0].st;
-	pl.lifted_en = en + 1;        /* half-open upper bound */
-	pl.rev       = pl.subpl[0].rev;
-	pl.liftable  = 1;
-	return pl;
-}
-
-/* Multi-interval co-location test (SV-breakpoint-aware grouping primitive).
- *
- * Two placements co-locate iff BOTH are liftable AND there exists a pair of
- * sub-placements (one from each) that share a primary contig and strand and whose
- * representative lifted starts are within lift_tol bp.  This generalizes the old
- * scalar "|Δlifted_st| <= lift_tol on the single collapsed interval" test:
- *   - A breakpoint-spanning ALT hit (multiple sub-placements straddling an
- *     SV-scale indel) co-locates with its primary twin via the matching
- *     sub-interval, instead of being dragged away by a min/max-collapsed span.
- *   - PARALOG SAFETY: co-location still requires a SHARED (pri_tid, rev, |Δst|<=tol)
- *     sub-interval.  Two distinct primary loci have single, far-apart
- *     sub-placements and therefore never co-locate -- the multi-interval change
- *     can ONLY let an ALT hit join the group of a primary at one of its own lifted
- *     positions; it can NOT merge two primary loci.  (Non-ALT hits carry exactly
- *     one sub-placement at their own position, so two primaries reduce to the
- *     original scalar test.)
- *
- * O(n_subpl_a * n_subpl_b), each bounded by MB_MAX_SUBPL. */
-int mb_places_colocate(const mb_place_t *a, const mb_place_t *b, int lift_tol)
-{
-	int i, j;
-	if (!a->liftable || !b->liftable) return 0;
-	for (i = 0; i < a->n_subpl; ++i) {
-		for (j = 0; j < b->n_subpl; ++j) {
-			int64_t d;
-			if (a->subpl[i].pri_tid != b->subpl[j].pri_tid) continue;
-			if (a->subpl[i].rev     != b->subpl[j].rev)     continue;
-			d = a->subpl[i].st - b->subpl[j].st;
-			if (d < 0) d = -d;
-			if (d <= lift_tol) return 1;
-		}
-	}
-	return 0;
-}
-
-/* Does ALT contig `alt_tid`'s .alt mapping cover primary position `pos` on
- * `pri_tid`?  An ALT contig is, by GRCh38 construction, an alternate of a
- * specific primary REGION; its lift blocks (with internal indel gaps) span
- * [min pri_st, max pri_en) on each primary contig they touch.  Containment is
- * tested in that OVERALL span (gaps included) so a position that falls in an
- * .alt deletion gap -- or whose ALT twin lifts there through an insertion hole
- * -- is still recognized as inside the ALT's primary region.  This is the
- * .alt-established correspondence used to fold an ALT twin onto a primary hit
- * the per-base lift could not co-locate (mb_reconcile_alt step 2b). */
-static int mb_alt_covers_primary(const l2b_t *l2b, int64_t alt_tid, int64_t pri_tid, int64_t pos)
-{
-	const l2b_ctg_t *ctg;
-	uint32_t b;
-	int64_t lo = -1, hi = -1;
-	if (alt_tid < 0 || alt_tid >= (int64_t)l2b->n_ctg) return 0;
-	ctg = &l2b->ctg[alt_tid];
-	if (!ctg->is_alt || ctg->n_lift == 0) return 0;
-	for (b = 0; b < ctg->n_lift; ++b) {
-		const l2b_lift_t *blk = &ctg->lift[b];
-		if (blk->pri_tid != pri_tid) continue;
-		if (lo < 0 || (int64_t)blk->pri_st < lo) lo = (int64_t)blk->pri_st;
-		if (hi < 0 || (int64_t)blk->pri_en > hi) hi = (int64_t)blk->pri_en;
-	}
-	if (lo < 0) return 0;                 /* contig does not map to pri_tid */
-	return pos >= lo && pos < hi;
 }
 
 void mb_idx_destroy(mb_idx_t *idx)
@@ -434,7 +239,6 @@ mb_hit_t *mb_gen_hit(void *km, uint32_t hash, int qlen, const l2b_t *l2b, int n_
 		ri->cnt = (int32_t)z[i].y;
 		ri->as = z[i].y >> 32;
 		mb_hit_set_coor(ri, qlen, l2b, a);
-		ri->is_alt = l2b->ctg[ri->tid].is_alt;
 	}
 	kfree(km, z);
 	return r;
@@ -559,17 +363,6 @@ add_primary:
 	kfree(km, w);
 }
 
-/* Mark the SAM primary among the group representatives (parent==id).
- *
- * `pref` is the PE-pair-chosen endpoint (mb_pair sets it to paux.i[r] when a
- * proper pair was applied; -1 otherwise / on the SE path).  When present and it
- * survived as a representative, it IS the read's primary placement: the pair
- * score (DP + insert-size consistency) disambiguated near-equal paralog copies
- * that this per-read pass cannot (the reps are sorted by DP score then hash, so
- * among equal-scoring subtelomeric/segdup paralogs the first-by-index rep is
- * effectively arbitrary -- and was emitting a different copy than the mate-
- * consistent one the pairing chose).  Otherwise fall back to the 5'-most
- * (is_primary5) or the first representative. */
 int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 {
 	int32_t i, new_pri, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
@@ -587,41 +380,11 @@ int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 	return new_pri;
 }
 
-/* Check whether hit r co-locates with any of the n_kept placements in kpl[].
- * Co-location is the multi-interval test (mb_places_colocate): any sub-interval
- * of r matches any sub-interval of a kept placement (same pri_tid, rev,
- * |Δst| <= lift_tol). */
-static int mb_place_matches_any(const l2b_t *l2b, const mb_hit_t *r,
-                                const mb_place_t *kpl, int n_kept, int lift_tol)
-{
-	mb_place_t pl;
-	int j;
-	if (n_kept == 0) return 0;
-	pl = mb_hit_place(l2b, r);   /* coarse: r->p may be NULL (pre-DP) */
-	if (!pl.liftable) return 0;
-	for (j = 0; j < n_kept; ++j)
-		if (mb_places_colocate(&kpl[j], &pl, lift_tol)) return 1;
-	return 0;
-}
-
-void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_, mb_hit_t *r,
-                   const l2b_t *l2b, int lift_tol)
+void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_, mb_hit_t *r)
 {
 	if (pri_ratio > 0.0f && *n_ > 0) {
 		int i, k, n = *n_, n_2nd = 0;
 		uint8_t *keep = Kcalloc(km, uint8_t, n);
-		/* Pass 1: existing keep logic, plus record each kept hit's lifted placement
-		 * so pass 2 can find kept primaries that sit at higher indices than their
-		 * ALT twins. */
-		mb_place_t *kept_pl = 0;
-		int n_kept = 0;
-		/* The survival guard below can only fire on an ALT hit, and hit->is_alt is
-		 * copied from l2b->ctg[tid].is_alt -- so with no .alt loaded no hit is ever
-		 * ALT, kept_pl is written but never read, and every mb_hit_place() call is
-		 * wasted. Gating on the contig count keeps that cost off the common path;
-		 * `l2b` itself is the sequence index and is always present. */
-		const int use_lift = l2b && l2b->n_alt_ctg > 0;
-		if (use_lift) kept_pl = Kmalloc(km, mb_place_t, n); /* worst-case: all kept */
 		for (i = 0; i < n; ++i) {
 			int p = r[i].parent;
 			if (p == i || r[i].inv) {
@@ -630,25 +393,6 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 				if (!(r[i].qs == r[p].qs && r[i].qe == r[p].qe && r[i].tid == r[p].tid && r[i].ts == r[p].ts && r[i].te == r[p].te))
 					keep[i] = 1, ++n_2nd;
 			}
-			if (use_lift && keep[i]) {
-				/* Record non-ALT primaries too: their "lifted" placement is their own
-				 * position, which is exactly the target co-location ALT twins must match. */
-				mb_place_t pl = mb_hit_place(l2b, &r[i]);
-				if (pl.liftable) kept_pl[n_kept++] = pl;
-			}
-		}
-		/* Pass 2 (survival guard): for each not-yet-kept ALT hit, force-keep it
-		 * if its lifted placement co-locates with any already-kept hit.  This is
-		 * intentionally generous: over-keeping is cheap; the authoritative grouping
-		 * happens later.  Never make this tolerance tighter than MB_LIFT_TOL. */
-		if (use_lift) {
-			for (i = 0; i < n; ++i) {
-				if (!keep[i] && r[i].is_alt) {
-					if (mb_place_matches_any(l2b, &r[i], kept_pl, n_kept, lift_tol))
-						keep[i] = 1;
-				}
-			}
-			kfree(km, kept_pl);
 		}
 		for (i = k = 0; i < n; ++i) {
 			if (keep[i]) r[k++] = r[i];
@@ -658,237 +402,6 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 		if (k != n) mb_sync_hits(km, k, r);
 		*n_ = k;
 	}
-}
-
-/* True iff any hit is from an ALT contig.  The reconciliation pass is gated on
- * this so non-ALT reads (and any reference with no .alt loaded) pay nothing. */
-int mb_any_alt(int n_hit, const mb_hit_t *hit)
-{
-	int i;
-	for (i = 0; i < n_hit; ++i)
-		if (hit[i].is_alt) return 1;
-	return 0;
-}
-
-/* Two hits' DP-adjusted scores (dp_max if extended, else the chaining score). */
-static inline int32_t mb_hit_dpscore(const mb_hit_t *h)
-{
-	return h->p ? h->p->dp_max : h->score;
-}
-
-/* Query spans [qs,qe) of two hits overlap (share at least one query base).
- * Non-overlapping spans are chimeric segments of the read, not competitors for
- * the same locus, so they must NOT contribute to one another's suboptimal. */
-static inline int mb_qspan_overlap(const mb_hit_t *a, const mb_hit_t *b)
-{
-	return a->qs < b->qe && b->qs < a->qe;
-}
-
-/* Post-extension liftover-group reconciliation (the heart of the ALT feature).
- *
- * Surviving hits are grouped by their lifted PLACEMENT (same pri_tid, same
- * strand on primary, and |Δlifted_st| <= MB_LIFT_TOL).  Each group represents
- * one primary locus; an ALT twin and the primary hit it lifts onto land in the
- * SAME group.  Within a group the representative (the surviving "primary" hit,
- * parent==id) is the highest-DP-scoring member; the others become subordinates
- * (parent := rep->id) so mb_set_sam_pri/mb_set_mapq treat them as secondary.
- *
- * The MAPQ-critical step is recomputing the group-scoped suboptimal fields so a
- * read's MAPQ reflects the second-best GROUP, not an ALT twin of its own locus.
- * subsc / n_sub / dp_max2 were written by the :778/:784 mb_set_parent run as
- * running maxima/accumulators; here we ZERO them on every (post-grouping)
- * representative and recompute over representatives ONLY:
- *   - dp_max2 = best OTHER-group rep dp_max whose query span overlaps this rep
- *   - subsc   = that competing score
- *   - n_sub   = count of other-group reps within sub_diff of this rep
- * Intra-group members contribute nothing.  A hit promoted from subordinate to
- * representative by the new grouping is zeroed too: it still carries stale
- * numbers from when it was a child under the old parent.
- *
- * @param l2b       span-lift index (.alt loaded; used by mb_hit_place)
- * @param n_hit     number of surviving hits
- * @param hit       the hits (modified in place: parent, subsc, n_sub, dp_max2)
- * @param sub_diff  score window for counting near-tied competing groups (n_sub);
- *                  matches the value passed to mb_set_parent in the driver.
- */
-void mb_reconcile_alt(void *km, const l2b_t *l2b, int n_hit, mb_hit_t *hit, int sub_diff, int lift_tol)
-{
-	mb_place_t *pl;
-	int *grp;     /* group id (union-find style, flattened) per hit */
-	int *rep;     /* representative hit index per hit (== own index if rep) */
-	int i, j;
-
-	if (n_hit <= 0) return;
-
-	/* Per-thread kalloc arena (lock-free); NOT libc malloc -- on ALT-heavy WGS
-	 * this runs per read across all worker threads, and routing it through the
-	 * shared allocator serialized them on the mimalloc arena lock (threads parked
-	 * in __ulock_wait, parallelism 8.8x->6.8x).  Kmalloc/kfree on km is the
-	 * codebase convention and is contention-free.  (km==NULL falls back to libc
-	 * via the kalloc macros, preserving the MB_F_NO_KALLOC path.) */
-	pl  = Kmalloc(km, mb_place_t, n_hit);
-	grp = Kmalloc(km, int, n_hit);
-	rep = Kmalloc(km, int, n_hit);
-	/* Graceful on allocation failure: with km!=NULL the arena aborts on OOM, but
-	 * the km==NULL (MB_F_NO_KALLOC) path falls back to libc malloc which can
-	 * return NULL -- return rather than deref.  kfree() is NULL-safe. */
-	if (!pl || !grp || !rep) { kfree(km, pl); kfree(km, grp); kfree(km, rep); return; }
-
-	/* 1. lifted placement of every hit. */
-	for (i = 0; i < n_hit; ++i)
-		pl[i] = mb_hit_place(l2b, &hit[i]);
-
-	/* 2. group by lifted placement.  n_hit is small (a handful), so an O(n^2)
-	 * transitive close-up is cheaper and clearer than a real union-find: assign
-	 * each hit to the lowest-index hit it co-locates with that already has a
-	 * group.  Unliftable hits never match and stay singletons. */
-	for (i = 0; i < n_hit; ++i) grp[i] = i;            /* initially own group */
-	for (i = 0; i < n_hit; ++i) {
-		if (!pl[i].liftable) continue;
-		for (j = 0; j < i; ++j) {
-			if (!pl[j].liftable) continue;
-			if (grp[j] == grp[i]) continue;
-			if (mb_places_colocate(&pl[i], &pl[j], lift_tol)) {
-				/* Candidate merge of i's group (old) into j's group (neu).
-				 * Two hits are the SAME read alignment on primary vs ALT only
-				 * if they CO-LOCATE (share a lifted sub-interval: same pri_tid,
-				 * same strand, |Δst| <= MB_LIFT_TOL) AND their query spans
-				 * overlap.  Grouping is by transitive relabel for clarity, but
-				 * transitivity can drift: A~B and B~C may collapse A,C even when
-				 * A,C do not co-locate or have disjoint query spans (chimeric
-				 * segments).  Guard by requiring EVERY cross-pair between the two
-				 * groups to satisfy BOTH conditions before uniting them.  The
-				 * sub-interval co-location requirement preserves paralog safety:
-				 * a breakpoint-spanning ALT hit joins via its matching
-				 * sub-interval, but two distinct primary loci (single, far-apart
-				 * sub-placements) still never share one. */
-				int old = grp[i], neu = grp[j], t, u, ok = 1;
-				for (t = 0; t < n_hit && ok; ++t) {
-					if (grp[t] != old) continue;
-					for (u = 0; u < n_hit; ++u) {
-						if (grp[u] != neu) continue;
-						if (!mb_qspan_overlap(&hit[t], &hit[u])
-						    || !mb_places_colocate(&pl[t], &pl[u], lift_tol)) {
-							ok = 0; break;
-						}
-					}
-				}
-				if (ok) {
-					/* merge i's group into j's group: relabel every member. */
-					for (t = 0; t < n_hit; ++t)
-						if (grp[t] == old) grp[t] = neu;
-				}
-			}
-		}
-	}
-
-	/* 2b. ALT-ALTERNATE fold-in (placement-based, via the .alt correspondence).
-	 *
-	 * The per-base lift in step 2 groups an ALT twin with its primary only where
-	 * the lift is EXACT.  It fails when an .alt-internal structural indel
-	 * displaces the ALT twin's lifted placement beyond lift_tol, or drops the ALT
-	 * footprint into an insertion HOLE (unliftable) -- leaving the ALT twin as a
-	 * co-equal group representative that both steals the SAM-primary slot (read
-	 * placed on the ALT contig) and dilutes the primary's MAPQ to 0.  Recognize,
-	 * via the .alt RECORD (this ALT contig is an alternate of a specific primary
-	 * region), that an ALT hit which (a) shares read bases with a non-ALT hit
-	 * -- same fragment, not a chimeric segment -- and (b) whose contig maps over
-	 * that non-ALT hit's primary locus, is an ALTERNATE PLACEMENT of that locus.
-	 * Fold its whole group into the non-ALT hit's group.
-	 *
-	 * Applied ONLY to an ALT hit whose group has NO non-ALT member (the exact
-	 * lift already failed to co-locate it).  Paralog-safe: only ALT-vs-non-ALT
-	 * folds; two genuine primary loci are both non-ALT and never merge here, so a
-	 * truly ambiguous multi-mapper keeps MAPQ 0.  This does NOT discard ALT hits
-	 * categorically -- an ALT hit with no overlapping primary (a read genuinely
-	 * from an ALT-only region) stays an independent representative. */
-	{
-		uint8_t *grp_has_pri = Kcalloc(km, uint8_t, n_hit);
-		if (grp_has_pri) {
-			for (i = 0; i < n_hit; ++i)
-				if (!hit[i].is_alt) grp_has_pri[grp[i]] = 1;
-			for (i = 0; i < n_hit; ++i) {
-				if (!hit[i].is_alt) continue;            /* fold ALT hits only */
-				if (grp_has_pri[grp[i]]) continue;        /* already grouped with a primary */
-				for (j = 0; j < n_hit; ++j) {
-					int old, neu, t;
-					if (hit[j].is_alt) continue;          /* into a non-ALT hit */
-					if (grp[j] == grp[i]) continue;
-					if (!mb_qspan_overlap(&hit[i], &hit[j])) continue;
-					if (!mb_alt_covers_primary(l2b, hit[i].tid, pl[j].pri_tid, pl[j].lifted_st))
-						continue;
-					old = grp[i]; neu = grp[j];
-					for (t = 0; t < n_hit; ++t) if (grp[t] == old) grp[t] = neu;
-					grp_has_pri[grp[i]] = 1;
-					break;
-				}
-			}
-			kfree(km, grp_has_pri);
-		}
-	}
-
-	/* 3. representative per group -- determined AFTER the new grouping.  Within a
-	 *    group every member is the SAME primary locus, so the primary-assembly
-	 *    (non-ALT) member is the representative the read is reported on: an ALT
-	 *    copy is an ALTERNATE of this locus, never a "better" locus, so a non-ALT
-	 *    member outranks an ALT member REGARDLESS of DP score.  DP score (then
-	 *    larger hash) decides only between members of the same is_alt class. */
-	for (i = 0; i < n_hit; ++i) rep[i] = grp[i];   /* seed with the label index */
-	for (i = 0; i < n_hit; ++i) {
-		int g = grp[i], r = rep[g];
-		int32_t si = mb_hit_dpscore(&hit[i]), sr = mb_hit_dpscore(&hit[r]);
-		int better;
-		if (hit[i].is_alt != hit[r].is_alt) better = (!hit[i].is_alt); /* prefer non-ALT */
-		else if (si != sr) better = (si > sr);
-		else better = (hit[i].hash > hit[r].hash);
-		if (better) rep[g] = i;
-	}
-
-	/* 4a. wire subordinates to their group's representative. */
-	for (i = 0; i < n_hit; ++i) {
-		int r = rep[grp[i]];
-		hit[i].parent = hit[r].id;   /* reps get parent==id (r==i) automatically */
-	}
-
-	/* 4b. ZERO the suboptimal fields on every post-grouping representative
-	 *     (including ones promoted from subordinate) before recomputing -- the
-	 *     :778/:784 run left running maxima/accumulators that must be RESET. */
-	for (i = 0; i < n_hit; ++i) {
-		if (rep[grp[i]] != i) continue;            /* representatives only */
-		hit[i].subsc = 0;
-		hit[i].n_sub = 0;
-		if (hit[i].p) hit[i].p->dp_max2 = 0;
-	}
-
-	/* 4c. recompute over REPRESENTATIVES ONLY: each rep's suboptimal comes from
-	 *     other GROUPS' reps whose query span overlaps it (chimeric, i.e.
-	 *     non-overlapping, segments are not competitors).  Intra-group members
-	 *     contribute nothing because we only ever compare distinct reps. */
-	for (i = 0; i < n_hit; ++i) {
-		mb_hit_t *ri = &hit[i];
-		if (rep[grp[i]] != i) continue;            /* ri is a representative */
-		for (j = 0; j < n_hit; ++j) {
-			mb_hit_t *rj;
-			int32_t sj;
-			if (rep[grp[j]] != j) continue;        /* rj is a representative */
-			if (grp[j] == grp[i]) continue;        /* same group: not a competitor */
-			rj = &hit[j];
-			if (!mb_qspan_overlap(ri, rj)) continue;
-			sj = mb_hit_dpscore(rj);
-			if (sj > ri->subsc) ri->subsc = sj;
-			if (ri->p) {
-				if (sj > ri->p->dp_max2) ri->p->dp_max2 = sj;
-				/* n_sub counts near-tied competing groups: the competitor is
-				 * within sub_diff of this rep's own DP score (mirrors the
-				 * dp_max-dp_max <= sub_diff test in update_sub). */
-				if (ri->p->dp_max - sj <= sub_diff) ++ri->n_sub;
-			} else {
-				if (ri->score - sj <= sub_diff) ++ri->n_sub;
-			}
-		}
-	}
-
-	kfree(km, pl); kfree(km, grp); kfree(km, rep);
 }
 
 void mb_hit_sort(void *km, int *n_regs, mb_hit_t *r)
@@ -1127,18 +640,13 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 	hit = mb_gen_hit(b->km, hash, qlen, idx->l2b, n_hit, w, a);
 	kfree(b->km, w);
 	mb_set_parent(b->km, opt->mask_level, opt->mask_len, n_hit, hit, sub_diff, 0);
-	mb_select_sub(b->km, opt->pri_ratio, opt->min_len * 2, opt->best_n, &n_hit, hit, idx->l2b, opt->lift_tol);
+	mb_select_sub(b->km, opt->pri_ratio, opt->min_len * 2, opt->best_n, &n_hit, hit);
 
 	// base alignment
 	if (!(opt->flag & MB_F_NO_ALN)) {
 		hit = mb_align_skeleton(b->km, opt, idx, qlen, seq, mt, &n_hit, hit, a);
 		mb_set_parent(b->km, opt->mask_level, opt->mask_len, n_hit, hit, sub_diff, 0);
-		mb_select_sub(b->km, opt->pri_ratio, opt->min_len * 2, opt->best_n, &n_hit, hit, idx->l2b, opt->lift_tol);
-		/* Liftover-group reconciliation: group ALT twins with their primary locus
-		 * and rescope MAPQ to the second-best GROUP.  Runs before mb_set_sam_pri so
-		 * SAM primary/secondary reflect the new grouping; gated so non-ALT reads pay
-		 * nothing. */
-		if (mb_any_alt(n_hit, hit)) mb_reconcile_alt(b->km, idx->l2b, n_hit, hit, sub_diff, opt->lift_tol);
+		mb_select_sub(b->km, opt->pri_ratio, opt->min_len * 2, opt->best_n, &n_hit, hit);
 		mb_set_sam_pri(n_hit, hit, !!(opt->flag & MB_F_PRIMARY5));
 	}
 	for (i = 0; i < n_hit; ++i) {

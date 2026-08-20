@@ -49,7 +49,7 @@ else
 endif
 
 .SUFFIXES:.c .o
-.PHONY:all clean depend test
+.PHONY:all clean depend
 
 .c.o:
 		$(CC) -c $(CFLAGS) $(CPPFLAGS) $(INCLUDES) $< -o $@
@@ -78,19 +78,6 @@ libminibwa.a:$(LOBJS)
 
 minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) main.o
 		$(CC) $(CFLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) main.o -o $@ -L. -lminibwa $(LIBS)
-
-# Run the ALT liftover-group suite. Each script builds its own fixtures, but several
-# drive the api-test helpers, which live in their own Makefile and are not part of `all`
-# -- without them those scripts fail on a fresh checkout. Set MB_STOCK to a stock
-# minibwa to enable the no-.alt byte-identity comparisons; they are skipped without it.
-test:minibwa
-		$(MAKE) -C api-test
-		@fail=0; for t in test/altlg/test-*.sh; do \
-			printf '%s: ' "$$t"; \
-			if sh "$$t" > /tmp/altlg-log.$$$$ 2>&1; then echo PASS; \
-			else echo FAIL; cat /tmp/altlg-log.$$$$; fail=1; fi; \
-			rm -f /tmp/altlg-log.$$$$; \
-		done; exit $$fail
 
 clean:
 		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM

@@ -678,6 +678,65 @@ mb_bwt_t *mb_bwt_load(const char *fn)
 	return bwt;
 }
 
+int mb_bwt_save_sa(const char *fn, const mb_bwt_t *bwt)
+{
+	FILE *fp = fopen(fn, "wb");
+	if (fp == 0) return -1;
+	fwrite(MB_SA_MAGIC, 1, 4, fp);
+	fwrite(&bwt->sa_bit, 4, 1, fp);
+	fwrite(&bwt->n_sa,   8, 1, fp);
+	if (bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0 && bwt->sa)
+		fwrite(bwt->sa, 8, bwt->n_sa, fp);
+	fclose(fp);
+	return 0;
+}
+
+int mb_bwt_load_sa(mb_bwt_t *bwt, const char *fn)
+{
+	FILE *fp = fopen(fn, "rb");
+	char magic[4]; uint32_t sa_bit; uint64_t n_sa, expected;
+	if (fp == 0) return -1;
+	if (fread(magic,1,4,fp)!=4 || strncmp(magic,MB_SA_MAGIC,4)!=0) { fclose(fp); return -1; }
+	fread(&sa_bit,4,1,fp); fread(&n_sa,8,1,fp);
+	expected = (bwt->seq_len + (1ULL<<sa_bit)) >> sa_bit;
+	if (sa_bit == (uint32_t)-1 || n_sa != expected) { fclose(fp); return -1; }
+	if (bwt->sa && bwt->mmap == 0) free(bwt->sa);   /* only free heap SA, never mmap'd */
+	bwt->sa_bit = sa_bit; bwt->n_sa = n_sa;
+	bwt->sa = kom_malloc(uint64_t, n_sa);
+	if (fread(bwt->sa, 8, n_sa, fp) != n_sa) { fclose(fp); return -1; }
+	fclose(fp);
+	return 0;
+}
+
+mb_bwt_t *mb_bwt_load_nosa(const char *fn)
+{
+	FILE *fp;
+	char magic[4];
+	uint64_t x[5];
+	mb_bwt_t *bwt;
+
+	fp = fopen(fn, "rb");
+	if (fp == 0) return 0;
+	fread(magic, 1, 4, fp);
+	if (strncmp(magic, MB_MAGIC, 4) != 0) {
+		fclose(fp);
+		return 0;
+	}
+	bwt = mb_bwt_init();
+	fread(&bwt->sa_bit, 4, 1, fp);
+	fread(x, 8, 5, fp);
+	bwt->primary = x[0];
+	memcpy(&bwt->L2[1], &x[1], 32);
+	bwt->seq_len = bwt->L2[4];
+	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
+	bwt->data = kom_calloc(uint64_t, bwt->data_len);
+	read_huge(fp, bwt->data_len << 3, bwt->data);
+	fread(&bwt->n_sa, 8, 1, fp);
+	bwt->sa = 0; bwt->n_sa = 0; bwt->sa_bit = (uint32_t)-1;
+	fclose(fp);
+	return bwt;
+}
+
 mb_bwt_t *mb_bwt_load_mmap(const char *fn, int preload)
 {
 	uint8_t *base;

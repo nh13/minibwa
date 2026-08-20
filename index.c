@@ -320,10 +320,10 @@ int main_index(int argc, char *argv[])
 			}
 		}
 		else if (c == 's') seed = atol(o.arg);
-		else if (c == 901) return usage_index(stdout, seed, n_sa_bits? sa_bits[0] : 3, n_thread);
+		else if (c == 901) return usage_index(stdout, seed, n_sa_bits? sa_bits[0] : 4, n_thread);
 		else if (c == 902) is_meth = 1;
 	}
-	if (n_sa_bits == 0) { sa_bits[0] = 3; n_sa_bits = 1; } // default when -u is absent
+	if (n_sa_bits == 0) { sa_bits[0] = 4; n_sa_bits = 1; } // default when -u is absent
 	qsort(sa_bits, n_sa_bits, sizeof(int), cmp_int); // ascending: sa_bits[0] is densest (smallest sa_bit) -> bundled in .mbw
 	if (n_sa_bits > 1 && is_meth) {
 		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with --meth\n");

@@ -314,3 +314,33 @@ extern "C" void mb_b2_destroy(void *b2_)
     fmi_seed_close(b2->fmi);   /* frees cp_occ / sa_ms_byte / sa_ls_word */
     delete b2;
 }
+
+/* Cheap peek at <prefix>.bwt.2bit.64's SA sampling rate, without a full
+ * mb_b2_load. The file stores ref_seq_len as the leading int64 (offset 0);
+ * PR B2 appends sa_compx as a trailing int64 tag (see bwa_shm.cpp's
+ * off_sent_for / FMI_search::load_index's disk-path tail detection, which
+ * this mirrors). Solve for the sampling rate from the file size: for each
+ * candidate u in [0, CP_SHIFT], compute the layout size the on-disk file
+ * would have if it were sampled at 1<<u and tagged, and match it against the
+ * actual size. No tail match (legacy pre-B2 index) -> default rate 1/8. */
+extern "C" int mb_b2_peek_sa_intv(const char *prefix)
+{
+    char fn[1024];
+    snprintf(fn, sizeof fn, "%s.bwt.2bit.64", prefix);
+    FILE *fp = fopen(fn, "rb");
+    if (!fp) return -1;
+    int64_t ref_len = 0;
+    if (fread(&ref_len, 8, 1, fp) != 1) { fclose(fp); return -1; }
+    fseeko(fp, 0, SEEK_END);
+    off_t sz = ftello(fp);
+    fclose(fp);
+
+    const int64_t HDR = 6 * 8; /* ref_seq_len + count[5] */
+    int64_t cp = (ref_len >> CP_SHIFT) + 1;
+    for (int u = 0; u <= CP_SHIFT; ++u) { /* find the u whose layout matches sz */
+        int64_t ns = (ref_len >> u) + 1;
+        off_t base = HDR + cp * (off_t)sizeof(CP_OCC) + ns * (1 + 4) + 8 /*sentinel*/;
+        if (sz == base + 8 /*sa_compx tail*/) return 1 << u; /* tail present -> this u */
+    }
+    return 8; /* legacy no-tail index -> default 1/8 */
+}

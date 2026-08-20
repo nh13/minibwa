@@ -43,6 +43,13 @@ void  mb_b2_smem_batch(void *km, void *b2, int32_t n, mb_smem_entry_t *a);
  * bwa-mem2's prefetch-pooled get_sa_entries_prefetch. */
 void  mb_b2_sa_batch(void *km, void *b2, int64_t n, uint64_t *a);
 
+/* Cheaply read the SA sampling rate of the cp_occ index at `prefix`
+ * (<prefix>.bwt.2bit.64) WITHOUT doing a full mb_b2_load. Returns the SA
+ * interval (1<<sa_compx, e.g. 8 or 16), or -1 if the file is absent. Used by
+ * regime discovery to label/rank a cp_occ regime without paying the cost of
+ * loading it. */
+int mb_b2_peek_sa_intv(const char *prefix);
+
 #ifdef __cplusplus
 }
 #endif

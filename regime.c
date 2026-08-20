@@ -10,6 +10,9 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
+#ifdef MB_HAVE_B2
+#include "b2idx.h"
+#endif
 
 /* Fixed safety margin added on top of the raw on-disk footprint when
  * estimating a regime's peak RAM: covers query buffers, thread-local
@@ -246,8 +249,10 @@ static void fill_bwt_regime(mb_regime_t *rg, int sa_bit, uint64_t est_ram, const
  * redundant duplicate of the bundled regime, so listing it again would just
  * clutter `mb_regime_list_print` and `auto` picking without adding a
  * reachable option.
- * b2_available is accepted for forward compatibility with M3's cp_occ
- * regimes; nothing is discovered for it in M2. */
+ * When `b2_available` (compiled with MB_HAVE_B2 and the caller says the
+ * backend is usable) and a co-located bwa-mem3 cp_occ index is present
+ * (<prefix>.bwt.2bit.64 + .pac + .amb + .ann), also discover one
+ * MB_BACKEND_CP_OCC regime named "sa%d-b2" for its SA sampling rate. */
 int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_regime_t *out, int max){
 	char fn_l2b[1152], fn_mbw[1152];
 	struct stat st_l2b, st_mbw;
@@ -358,11 +363,47 @@ int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_reg
 		globfree(&gl);
 	}
 
-	if (b2_available) {
-		/* M3 adds cp_occ regimes here (a second SA-lookup backend that
-		 * trades RAM for speed via a checkpointed OCC structure). Not
-		 * implemented in M2: b2_available is always 0 at call sites. */
+#ifdef MB_HAVE_B2
+	/* cp_occ regime: a second SA-lookup backend (bwa-mem2/bwa-mem3's
+	 * checkpointed OCC structure) that trades RAM for SMEM/SA-lookup speed.
+	 * Only offered when the caller says the backend is compiled in AND a
+	 * co-located bwa-mem3 index is present for this prefix. */
+	if (b2_available && n < max) {
+		char fn_b2[1152], fn_pac[1152], fn_amb[1152], fn_ann[1152];
+		struct stat st_b2, st_pac, st_amb, st_ann;
+		snprintf(fn_b2,  sizeof fn_b2,  "%s.bwt.2bit.64", prefix);
+		snprintf(fn_pac, sizeof fn_pac, "%s.pac", prefix);
+		snprintf(fn_amb, sizeof fn_amb, "%s.amb", prefix);
+		snprintf(fn_ann, sizeof fn_ann, "%s.ann", prefix);
+		if (stat(fn_b2, &st_b2) == 0 && stat(fn_pac, &st_pac) == 0 &&
+		    stat(fn_amb, &st_amb) == 0 && stat(fn_ann, &st_ann) == 0) {
+			int intv = mb_b2_peek_sa_intv(prefix); /* 8, 16, ... or -1 if absent */
+			if (intv > 0) {
+				mb_regime_t *g = &out[n];
+				int sa_bit;
+				for (sa_bit = 0; (1U << sa_bit) < (unsigned)intv; ++sa_bit) {} /* log2(intv); unsigned shift, intv>0 guarded above */
+				memset(g, 0, sizeof *g);
+				g->backend = MB_BACKEND_CP_OCC;
+				g->sa_bit = sa_bit;
+				snprintf(g->name, sizeof g->name, "sa%d-b2", intv);
+				g->est_ram = (uint64_t)st_b2.st_size + (uint64_t)st_pac.st_size + MB_REGIME_MARGIN;
+				/* +1 places a cp_occ regime just above the same-density BWT
+				 * rung (cp_occ's SMEM search has a per-step edge over
+				 * classic-BWT rank at equal sampling density). The full
+				 * cross-backend grid rank -- e.g. sa16-b2 vs sa8 -- is NOT
+				 * assumed here; it is confirmed by the manual campaign
+				 * measurement pass and these constants should be revisited
+				 * against that data before shipping. */
+				g->speed_rank = 2 * (6 - sa_bit) + 1;
+				g->mode_mask = MB_MODE_SRPE; /* SR/PE only: not eligible for meth/hic/lr */
+				g->sa_path[0] = '\0';
+				n++;
+			}
+		}
 	}
+#else
+	(void)b2_available; /* M3's cp_occ backend isn't compiled in; nothing to discover */
+#endif
 
 	return n;
 }

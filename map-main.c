@@ -581,7 +581,12 @@ int main_map(int argc, char *argv[])
 	{
 		mb_regime_t rgs[16];
 		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
-		int nrg = mb_regime_discover(argv[o.ind], is_meth, /*b2_available=*/0, rgs, 16);
+#ifdef MB_HAVE_B2
+		int b2_available = 1;
+#else
+		int b2_available = 0;
+#endif
+		int nrg = mb_regime_discover(argv[o.ind], is_meth, b2_available, rgs, 16);
 		if (list_regimes) {
 			if (nrg == 0) {
 				fprintf(stderr, "[ERROR] index not found (missing .l2b/.mbw); build one with 'minibwa index'\n");

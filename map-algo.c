@@ -6,6 +6,9 @@
 #include "kommon.h"
 #include "ksort.h"
 #include "regime.h"
+#ifdef MB_HAVE_B2
+#include "b2idx.h"
+#endif
 
 #define key_128x(a) ((a).x)
 KRADIX_SORT_INIT(mb128x, mb128_t, key_128x, 8)
@@ -67,6 +70,33 @@ end_idx_load_mmap:
 	return idx;
 }
 
+#ifdef MB_HAVE_B2
+/* Load an index backed by the bwa-mem2/bwa-mem3 cp_occ FM-index (b2idx.cpp)
+ * instead of minibwa's native BWT. Loads <prefix>.l2b as usual for the
+ * reference layer, and <prefix>.bwt.2bit.64 (+ .pac/.amb/.ann) via mb_b2_load
+ * for seeding; idx->bwt is left NULL (see seed.c's idx->b2 dispatch) and
+ * idx->b2 holds the opaque cp_occ handle. is_meth is not yet supported on
+ * this backend -- the .l2b-only load here is Phase 1; bisulfite (Phase-2/bns)
+ * support lands in a later PR. Returns NULL on any failure, freeing anything
+ * already allocated. */
+static mb_idx_t *mb_idx_load_b2(const char *prefix, int32_t is_meth)
+{
+	char buf[1024];
+	mb_idx_t *idx = 0;
+	l2b_t *l2b;
+	void *b2;
+	if (is_meth) return 0; /* not supported by the cp_occ backend yet */
+	snprintf(buf, sizeof buf, "%s.l2b", prefix);
+	l2b = l2b_load(buf);
+	if (!l2b) return 0;
+	b2 = mb_b2_load(prefix);
+	if (!b2) { l2b_destroy(l2b); return 0; }
+	idx = kom_calloc(mb_idx_t, 1);
+	idx->l2b = l2b; idx->b2 = b2; idx->bwt = 0; idx->is_meth = 0;
+	return idx;
+}
+#endif
+
 /* Load an index for a specific SA regime `rg` (see regime.h). The .l2b is
  * loaded per `use_mmap` as usual. For the .mbw:
  *   - bundled SA (rg->sa_path[0]==0): loaded normally via mb_bwt_load[_mmap],
@@ -78,7 +108,9 @@ end_idx_load_mmap:
  *     only frees bwt->sa when bwt->mmap==0, so mixing the two would either
  *     leak the sidecar SA or double-free/munmap it); forcing the heap path
  *     keeps a single, consistent owner for every allocation in `bwt`.
- * Only MB_BACKEND_BWT is handled; MB_BACKEND_CP_OCC is added in a later PR (M3).
+ * MB_BACKEND_CP_OCC regimes route to mb_idx_load_b2 (compile-optional,
+ * requires MB_HAVE_B2); without it, a cp_occ regime never reaches here
+ * because mb_regime_discover never offers one.
  * Returns NULL on any failure, freeing anything already allocated. */
 mb_idx_t *mb_idx_load_regime(const char *prefix, const mb_regime_t *rg, int use_mmap, int preload)
 {
@@ -86,6 +118,13 @@ mb_idx_t *mb_idx_load_regime(const char *prefix, const mb_regime_t *rg, int use_
 	mb_idx_t *idx = 0;
 	l2b_t *l2b;
 	mb_bwt_t *bwt = 0;
+	if (rg->backend == MB_BACKEND_CP_OCC) {
+#ifdef MB_HAVE_B2
+		return mb_idx_load_b2(prefix, /*is_meth=*/0);
+#else
+		return 0; /* unreachable: discovery never offers cp_occ without MB_HAVE_B2 */
+#endif
+	}
 	buf = kom_calloc(char, strlen(prefix) + 16); /* room for ".meth.mbw" */
 	strcat(strcpy(buf, prefix), ".l2b");
 	l2b = use_mmap? l2b_load_mmap(buf, preload) : l2b_load(buf);
@@ -111,6 +150,9 @@ void mb_idx_destroy(mb_idx_t *idx)
 {
 	if (idx == 0) return;
 	mb_bwt_destroy(idx->bwt);
+#ifdef MB_HAVE_B2
+	if (idx->b2) mb_b2_destroy(idx->b2);
+#endif
 	l2b_destroy(idx->l2b);
 	free(idx);
 }

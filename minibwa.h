@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-#include "l2bit.h"
-
 #define MB_VERSION "0.7-r421"
 
 #define MB_F_PAF              (0x1LL)       // output in the PAF format
@@ -89,6 +87,14 @@ typedef struct {
 	int64_t cap_kalloc;
 	int32_t lift_tol;  // ALT liftover-group co-location tolerance in bp (default MB_LIFT_TOL)
 } mb_opt_t;
+
+/* Deliberately here rather than beside <stdint.h> at the top: l2b_t is needed only
+ * by the mb_hit_place() prototype below, and an include on the line above
+ * MB_VERSION shares a conflict hunk with every upstream version bump.  Because
+ * git rerere keys its cache on the conflict pre-image, and that pre-image would
+ * then contain the version string, no recorded resolution could ever be reused
+ * and this feature dropped out of the assembly once per release.  Keep it here. */
+#include "l2bit.h"
 
 struct mb_idx_s;
 typedef struct mb_idx_s mb_idx_t;

@@ -76,13 +76,16 @@ end_idx_load_mmap:
  * idx->b2 dispatch) and idx->b2 holds the opaque cp_occ handle. is_meth is
  * not yet supported on this backend (SR/PE only).
  *
- * Phase-2 reference-layer reconstruction: the reference/contig layer
- * (idx->l2b) is no longer read from minibwa's own <prefix>.l2b file. Instead
- * it is rebuilt in memory from the bwa-mem3 index's own reference layer
- * (<prefix>.pac/.amb/.ann, via mb_b2_load_bns + l2b_from_bns), so the cp_occ
- * backend has no dependency on the .l2b file at all. Downstream mapping
- * (chaining/extension/pairing/SAM) is unchanged: it only ever sees idx->l2b,
- * which is byte-validated against the real .l2b (see task-4 test/report).
+ * Reference layer (idx->l2b): prefer minibwa's own <prefix>.l2b when it is
+ * present -- loading it is a cheap slurp (~1s on hg38). Only when it is absent
+ * fall back to Phase-2 reconstruction, rebuilding the reference in memory from
+ * the bwa-mem3 index's own layer (<prefix>.pac/.amb/.ann, via mb_b2_load_bns +
+ * l2b_from_bns). Reconstruction is byte-identical to the real .l2b (task-4
+ * test/report) but loops over the entire 2N packed reference, which costs ~8.5s
+ * on hg38 -- so it is worth avoiding whenever the .l2b already exists (the
+ * common case: bwa-mem2/3 indexes are usually built alongside minibwa's). The
+ * fallback keeps the cp_occ backend fully functional with no .l2b at all
+ * ("reference purity"). Downstream mapping only ever sees idx->l2b.
  * Returns NULL on any failure, freeing anything already allocated. */
 static mb_idx_t *mb_idx_load_b2(const char *prefix, int32_t is_meth)
 {
@@ -91,13 +94,18 @@ static mb_idx_t *mb_idx_load_b2(const char *prefix, int32_t is_meth)
 	uint8_t *pac;
 	int64_t l_pac;
 	l2b_t *l2b;
+	char fn_l2b[1024];
 	if (is_meth) return 0; /* not supported by the cp_occ backend yet */
 	b2 = mb_b2_load(prefix);
 	if (!b2) return 0;
-	if (mb_b2_load_bns(prefix, &bns, &pac, &l_pac) != 0) { mb_b2_destroy(b2); return 0; }
-	l2b = l2b_from_bns(bns, pac, l_pac);
-	mb_b2_free_bns(bns, pac); /* l2b_from_bns deep-copies; bns/pac not needed anymore */
-	if (!l2b) { mb_b2_destroy(b2); return 0; }
+	snprintf(fn_l2b, sizeof fn_l2b, "%s.l2b", prefix);
+	l2b = l2b_load(fn_l2b); /* fast path: co-located .l2b present */
+	if (!l2b) { /* .l2b absent -> Phase-2 reconstruction from the cp_occ index's bns/pac */
+		if (mb_b2_load_bns(prefix, &bns, &pac, &l_pac) != 0) { mb_b2_destroy(b2); return 0; }
+		l2b = l2b_from_bns(bns, pac, l_pac);
+		mb_b2_free_bns(bns, pac); /* l2b_from_bns deep-copies; bns/pac not needed anymore */
+		if (!l2b) { mb_b2_destroy(b2); return 0; }
+	}
 	idx = kom_calloc(mb_idx_t, 1);
 	idx->l2b = l2b; idx->b2 = b2; idx->bwt = 0; idx->is_meth = 0;
 	return idx;

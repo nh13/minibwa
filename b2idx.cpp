@@ -16,10 +16,20 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include "fmi_seed_api.h"   /* FmiSeed, SMEM, CP_OCC, one_hot_mask_array,
                                CP_SHIFT/CP_MASK, _mm_countbits_64,
                                fmi_seed_open/close/cp_occ/count/sentinel/sa_prefetch */
+
+/* Phase-2 reference-layer reconstruction (drops the .l2b file dependency for
+ * the cp_occ backend) needs bwa-mem3's reference-sequence API directly:
+ * bns_restore/bns_destroy/_get_pac/bntseq_t/bntann1_t/bntamb1_t. This is
+ * orthogonal to the cp_occ *seeding* surface that fmi_seed_api.h exists to
+ * hide (B1's facade), so it is included directly here rather than added to
+ * that facade. bntseq.h is found via the -I$(BWAMEM3_DIR)/src path already
+ * set for this translation unit's compile rule (Makefile). */
+#include "bntseq.h"
 
 /* fmi_seed_api.h is a lean facade and does not pull in NEON intrinsics (unlike
  * FMI_search.h, which drags simd_compat.h in transitively). b2_occ_sp_sz below
@@ -343,4 +353,35 @@ extern "C" int mb_b2_peek_sa_intv(const char *prefix)
         if (sz == base + 8 /*sa_compx tail*/) return 1 << u; /* tail present -> this u */
     }
     return 8; /* legacy no-tail index -> default 1/8 */
+}
+
+/* --------------------- Phase-2: bns + pac reconstruction ------------------ */
+/* Loads bwa-mem3's bns (<prefix>.ann/.amb, opening <prefix>.pac) and slurps
+ * the packed 2-bit reference into a heap buffer, so l2b_from_bns (l2bit.c)
+ * can rebuild an in-memory l2b_t equivalent to <prefix>.l2b without minibwa
+ * ever reading that file. The pac read size (l_pac/4+1 bytes) intentionally
+ * undershoots the on-disk .pac file's true size (bwa-mem3's bns_dump always
+ * writes l_pac/4+2 bytes: ceil(l_pac/4) data bytes plus a 1- or 2-byte tail
+ * recording l_pac%4) -- l_pac/4+1 is always <= that, so the read never runs
+ * past EOF, and it covers every byte _get_pac needs for i in [0, l_pac). */
+extern "C" int mb_b2_load_bns(const char *prefix, void **bns_out, uint8_t **pac_out, int64_t *l_pac_out)
+{
+    bntseq_t *bns = bns_restore(prefix);
+    if (!bns) return -1;
+    int64_t nbytes = bns->l_pac / 4 + 1;
+    uint8_t *pac = (uint8_t*)calloc((size_t)nbytes, 1);
+    if (!pac) { bns_destroy(bns); return -1; }
+    if (fread(pac, 1, (size_t)nbytes, bns->fp_pac) != (size_t)nbytes) {
+        free(pac); bns_destroy(bns); return -1;
+    }
+    fclose(bns->fp_pac); bns->fp_pac = 0; /* bns_destroy would otherwise close it again */
+    *bns_out = bns; *pac_out = pac; *l_pac_out = bns->l_pac;
+    return 0;
+}
+
+extern "C" void mb_b2_free_bns(void *bns_, uint8_t *pac)
+{
+    bntseq_t *bns = (bntseq_t*)bns_;
+    if (bns) bns_destroy(bns);
+    free(pac);
 }

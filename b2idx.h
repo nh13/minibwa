@@ -50,6 +50,19 @@ void  mb_b2_sa_batch(void *km, void *b2, int64_t n, uint64_t *a);
  * loading it. */
 int mb_b2_peek_sa_intv(const char *prefix);
 
+/* Phase-2 reference-layer reconstruction: load bwa-mem3's bns (<prefix>.ann +
+ * <prefix>.amb) and slurp the packed 2-bit reference (<prefix>.pac) into a
+ * heap buffer, so the cp_occ backend no longer needs minibwa's own <prefix>.l2b
+ * file. `*bns_out` is an opaque bntseq_t* (declared void* here so this header
+ * stays C-callable without pulling in bwa-mem3's bntseq.h); pass it to
+ * l2b_from_bns (l2bit.h) or mb_b2_free_bns. Returns 0 on success, -1 on any
+ * failure (nothing left allocated on failure). */
+int mb_b2_load_bns(const char *prefix, void **bns_out, uint8_t **pac_out, int64_t *l_pac_out);
+
+/* Free the bns handle and pac buffer produced by mb_b2_load_bns. Safe to call
+ * after l2b_from_bns, which deep-copies everything it needs. */
+void mb_b2_free_bns(void *bns, uint8_t *pac);
+
 #ifdef __cplusplus
 }
 #endif

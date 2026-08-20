@@ -55,6 +55,11 @@ ifeq ($(B2),1)
 	override CPPFLAGS += -DMB_HAVE_B2
 	CXX ?= c++
 	BWAMEM3_DIR ?= /Users/nhomer/work/git/bwa-mem3/main
+	# Phase-2 reference reconstruction: l2bit.c's l2b_from_bns (built via the
+	# generic .c.o rule, not the b2idx.o-specific one below) needs bwa-mem3's
+	# bntseq.h directly under MB_HAVE_B2, so extend INCLUDES for every .c
+	# compile in a B2 build. Harmless for TUs that don't include it.
+	override INCLUDES += -I$(BWAMEM3_DIR)/src
 	UNAME_S := $(shell uname -s)
 	ifneq (,$(filter arm64 aarch64,$(ARCH)))
 		B3_ARCH_FLAGS = -DAPPLE_SILICON=1 -DCACHE_LINE_BYTES=128 \

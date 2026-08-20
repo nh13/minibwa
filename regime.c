@@ -256,9 +256,9 @@ static void fill_bwt_regime(mb_regime_t *rg, int sa_bit, uint64_t est_ram, const
 int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_regime_t *out, int max){
 	char fn_l2b[1152], fn_mbw[1152];
 	struct stat st_l2b, st_mbw;
-	uint32_t bundled_sa_bit;
-	uint64_t l2b_size, mbw_size, seq_len, bundled_sa_bytes, bwt_portion;
-	int n = 0;
+	uint32_t bundled_sa_bit = 0;
+	uint64_t l2b_size = 0, mbw_size = 0, seq_len = 0, bundled_sa_bytes, bwt_portion = 0;
+	int n = 0, have_native;
 
 	if (!prefix || !out || max <= 0) return 0;
 
@@ -269,98 +269,107 @@ int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_reg
 	snprintf(fn_l2b, sizeof fn_l2b, "%s.l2b", prefix);
 	snprintf(fn_mbw, sizeof fn_mbw, is_meth? "%s.meth.mbw" : "%s.mbw", prefix);
 
-	if (stat(fn_l2b, &st_l2b) != 0 || stat(fn_mbw, &st_mbw) != 0) return 0;
-	if (read_u32_at(fn_mbw, 4, &bundled_sa_bit) != 0) return 0;
-	/* Reject an out-of-range bundled sa_bit before it reaches the 1U<<sa_bit /
-	 * 1ULL<<sa_bit shifts below (naming, RAM estimate): >=32 exceeds any density
-	 * the sampler produces, and the 32-bit `1U<<sa_bit` naming shift is undefined
-	 * at >=32 (the `1ULL<<` RAM math holds to 63). The sentinel (uint32_t)-1 is
-	 * >=32, so a bundled .mbw with no SA is rejected here too. */
-	if (bundled_sa_bit >= 32) return 0;
+	/* Phase-2: minibwa's own .l2b/.mbw are optional -- a cp_occ-only index
+	 * (bwa-mem3's .bwt.2bit.64/.pac/.amb/.ann with no .l2b/.mbw alongside)
+	 * is valid and offers only the cp_occ regime discovered below. Only
+	 * bail early when NEITHER backend's files are present at all; a missing
+	 * .l2b/.mbw simply skips the native bundled/sidecar regimes instead of
+	 * failing discovery outright. */
+	have_native = stat(fn_l2b, &st_l2b) == 0 && stat(fn_mbw, &st_mbw) == 0;
+	if (have_native && read_u32_at(fn_mbw, 4, &bundled_sa_bit) != 0) have_native = 0;
+	/* An out-of-range bundled sa_bit (>=32, or the (uint32_t)-1 no-SA sentinel)
+	 * is a corrupt/unusable native header: skip the native regimes rather than
+	 * fail all discovery, before it reaches the 1U<<sa_bit / 1ULL<<sa_bit shifts
+	 * below. The 32-bit `1U<<sa_bit` naming shift is undefined at >=32 (the
+	 * `1ULL<<` RAM math holds to 63), so <32 is the operative bound. cp_occ
+	 * discovery still proceeds. */
+	if (have_native && bundled_sa_bit >= 32) have_native = 0;
 	/* .mbw header: magic[4], sa_bit u32 @4, primary u64 @8, L2[1..4] 4*u64 @16
 	 * -- L2[4] (== seq_len) is at offset 16 + 3*8 = 40. */
-	if (read_u64_at(fn_mbw, 40, &seq_len) != 0) return 0;
+	if (have_native && read_u64_at(fn_mbw, 40, &seq_len) != 0) have_native = 0;
 
-	l2b_size = (uint64_t)st_l2b.st_size;
-	mbw_size = (uint64_t)st_mbw.st_size;
+	if (have_native) {
+		l2b_size = (uint64_t)st_l2b.st_size;
+		mbw_size = (uint64_t)st_mbw.st_size;
 
-	/* mbw_size already contains the bundled SA; subtract it out so every
-	 * regime's estimate is built from the same BWT-only base plus its own
-	 * SA footprint -- otherwise a sparser sidecar regime (smaller SA) would
-	 * be estimated as *larger* than the bundled (dense) regime, since
-	 * mbw_size's bundled SA would be double counted on top of it. */
-	bundled_sa_bytes = ((seq_len + (1ULL<<bundled_sa_bit)) >> bundled_sa_bit) * 8;
-	bwt_portion = bundled_sa_bytes > mbw_size ? 0 : mbw_size - bundled_sa_bytes;
+		/* mbw_size already contains the bundled SA; subtract it out so every
+		 * regime's estimate is built from the same BWT-only base plus its own
+		 * SA footprint -- otherwise a sparser sidecar regime (smaller SA) would
+		 * be estimated as *larger* than the bundled (dense) regime, since
+		 * mbw_size's bundled SA would be double counted on top of it. */
+		bundled_sa_bytes = ((seq_len + (1ULL<<bundled_sa_bit)) >> bundled_sa_bit) * 8;
+		bwt_portion = bundled_sa_bytes > mbw_size ? 0 : mbw_size - bundled_sa_bytes;
 
-	/* The bundled regime: its SA lives inside .mbw itself. */
-	if (n < max) {
-		fill_bwt_regime(&out[n], (int)bundled_sa_bit,
-			est_ram_for(l2b_size, bwt_portion, seq_len, (int)bundled_sa_bit), NULL, is_meth);
-		n++;
-	}
-
-	/* Sidecar regimes: <prefix>.sa.u* -- only for a normal index. A meth index
-	 * never has sidecars (multi-density -u is rejected with --meth). */
-	if (!is_meth) {
-		char pattern[1152];
-		glob_t gl;
-		snprintf(pattern, sizeof pattern, "%s.sa.u*", prefix);
-		memset(&gl, 0, sizeof gl);
-		if (glob(pattern, 0, NULL, &gl) == 0) {
-			size_t i;
-			for (i = 0; i < gl.gl_pathc && n < max; ++i) {
-				const char *side = gl.gl_pathv[i];
-				struct stat st_side;
-				uint32_t side_sa_bit;
-				if (stat(side, &st_side) != 0) continue; /* validates the sidecar exists/is readable */
-				/* A path that would not fit mb_regime_t.sa_path is unusable: it
-				 * would be truncated before mb_bwt_load_sa() could open it, so
-				 * skip it explicitly rather than register a silently broken
-				 * regime. (The base .mbw path is built dynamically at load, so
-				 * long prefixes still work for the bundled regime.) */
-				if (strlen(side) >= sizeof out[n].sa_path) {
-					if (kom_verbose >= 2)
-						fprintf(stderr, "[W::mb_regime_discover] sidecar path too long, skipping: %s\n", side);
-					continue;
-				}
-				if (read_u32_at(side, 4, &side_sa_bit) != 0) continue;
-				if (side_sa_bit >= 32) continue; /* corrupt sidecar header: guards 1U<<sa_bit below */
-				if (side_sa_bit == bundled_sa_bit) continue; /* de-dup: redundant with the bundled regime */
-				/* Fully validate the sidecar before registering it. mb_regime_pick()
-				 * may prefer a sparser sidecar (higher speed_rank) over the bundled
-				 * regime; a malformed one registered here would then be selected only
-				 * to fail at mb_bwt_load_sa(), which aborts with no fallback. Mirror
-				 * the loader's own checks -- the MB_SA_MAGIC header, the SA count
-				 * expected from seq_len, and a complete on-disk payload -- so a corrupt
-				 * sidecar is skipped at discovery instead. The reference fingerprint is
-				 * NOT part of the sidecar (it lives separately in <prefix>.mbw.fp), so
-				 * it is deliberately not required here. */
-				{
-					char magic[4];
-					uint64_t side_n_sa, expected_n_sa;
-					if (read_bytes_at(side, 0, magic, 4) != 0 || memcmp(magic, MB_SA_MAGIC, 4) != 0) {
-						if (kom_verbose >= 2)
-							fprintf(stderr, "[W::mb_regime_discover] sidecar has a bad magic, skipping: %s\n", side);
-						continue;
-					}
-					if (read_u64_at(side, 8, &side_n_sa) != 0) continue;
-					expected_n_sa = (seq_len + (1ULL<<side_sa_bit)) >> side_sa_bit;
-					/* payload begins at offset 16 == magic[4] + sa_bit[4] + n_sa[8]. The
-					 * count check runs first, so a garbage-huge side_n_sa short-circuits
-					 * before the size arithmetic. */
-					if (side_n_sa != expected_n_sa ||
-					    (uint64_t)st_side.st_size != 16 + side_n_sa * 8) {
-						if (kom_verbose >= 2)
-							fprintf(stderr, "[W::mb_regime_discover] sidecar SA count/size mismatch, skipping: %s\n", side);
-						continue;
-					}
-				}
-				fill_bwt_regime(&out[n], (int)side_sa_bit,
-					est_ram_for(l2b_size, bwt_portion, seq_len, (int)side_sa_bit), side, is_meth);
-				n++;
-			}
+		/* The bundled regime: its SA lives inside .mbw itself. */
+		if (n < max) {
+			fill_bwt_regime(&out[n], (int)bundled_sa_bit,
+				est_ram_for(l2b_size, bwt_portion, seq_len, (int)bundled_sa_bit), NULL, is_meth);
+			n++;
 		}
-		globfree(&gl);
+
+		/* Sidecar regimes: <prefix>.sa.u* -- only for a normal index. A meth index
+		 * never has sidecars (multi-density -u is rejected with --meth). */
+		if (!is_meth) {
+			char pattern[1152];
+			glob_t gl;
+			snprintf(pattern, sizeof pattern, "%s.sa.u*", prefix);
+			memset(&gl, 0, sizeof gl);
+			if (glob(pattern, 0, NULL, &gl) == 0) {
+				size_t i;
+				for (i = 0; i < gl.gl_pathc && n < max; ++i) {
+					const char *side = gl.gl_pathv[i];
+					struct stat st_side;
+					uint32_t side_sa_bit;
+					if (stat(side, &st_side) != 0) continue; /* validates the sidecar exists/is readable */
+					/* A path that would not fit mb_regime_t.sa_path is unusable: it
+					 * would be truncated before mb_bwt_load_sa() could open it, so
+					 * skip it explicitly rather than register a silently broken
+					 * regime. (The base .mbw path is built dynamically at load, so
+					 * long prefixes still work for the bundled regime.) */
+					if (strlen(side) >= sizeof out[n].sa_path) {
+						if (kom_verbose >= 2)
+							fprintf(stderr, "[W::mb_regime_discover] sidecar path too long, skipping: %s\n", side);
+						continue;
+					}
+					if (read_u32_at(side, 4, &side_sa_bit) != 0) continue;
+					if (side_sa_bit >= 32) continue; /* corrupt sidecar header: guards 1U<<sa_bit below */
+					if (side_sa_bit == bundled_sa_bit) continue; /* de-dup: redundant with the bundled regime */
+					/* Fully validate the sidecar before registering it. mb_regime_pick()
+					 * may prefer a sparser sidecar (higher speed_rank) over the bundled
+					 * regime; a malformed one registered here would then be selected only
+					 * to fail at mb_bwt_load_sa(), which aborts with no fallback. Mirror
+					 * the loader's own checks -- the MB_SA_MAGIC header, the SA count
+					 * expected from seq_len, and a complete on-disk payload -- so a corrupt
+					 * sidecar is skipped at discovery instead. The reference fingerprint is
+					 * NOT part of the sidecar (it lives separately in <prefix>.mbw.fp), so
+					 * it is deliberately not required here. */
+					{
+						char magic[4];
+						uint64_t side_n_sa, expected_n_sa;
+						if (read_bytes_at(side, 0, magic, 4) != 0 || memcmp(magic, MB_SA_MAGIC, 4) != 0) {
+							if (kom_verbose >= 2)
+								fprintf(stderr, "[W::mb_regime_discover] sidecar has a bad magic, skipping: %s\n", side);
+							continue;
+						}
+						if (read_u64_at(side, 8, &side_n_sa) != 0) continue;
+						expected_n_sa = (seq_len + (1ULL<<side_sa_bit)) >> side_sa_bit;
+						/* payload begins at offset 16 == magic[4] + sa_bit[4] + n_sa[8]. The
+						 * count check runs first, so a garbage-huge side_n_sa short-circuits
+						 * before the size arithmetic. */
+						if (side_n_sa != expected_n_sa ||
+						    (uint64_t)st_side.st_size != 16 + side_n_sa * 8) {
+							if (kom_verbose >= 2)
+								fprintf(stderr, "[W::mb_regime_discover] sidecar SA count/size mismatch, skipping: %s\n", side);
+							continue;
+						}
+					}
+					fill_bwt_regime(&out[n], (int)side_sa_bit,
+						est_ram_for(l2b_size, bwt_portion, seq_len, (int)side_sa_bit), side, is_meth);
+					n++;
+				}
+			}
+			globfree(&gl);
+		}
 	}
 
 #ifdef MB_HAVE_B2

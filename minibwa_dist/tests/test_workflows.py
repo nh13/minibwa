@@ -600,6 +600,16 @@ def test_a_hard_assembly_failure_exits_before_the_jq_parsing() -> None:
     is different: it DOES emit valid JSON, so it must still reach the outputs.
     """
     text = _executable(_run(_sync(), "assemble", "Assemble dist-next"))
-    guard = 'jq -e . /tmp/assembly.json'
+    guard = "jq -e . /tmp/assembly.json"
     assert guard in text, "a nonzero run with no parsable JSON must exit before jq"
     assert text.index(guard) < text.index("dropped=$(jq")
+
+
+def test_the_gates_step_builds_the_api_probes_it_depends_on() -> None:
+    """Feature suites shell out to the api-test probes, so the gates step must
+    build them rather than inherit them from an earlier step's side effect.
+    Without this the gate fails with "probe not built" -- a build error dressed
+    up as a test failure -- if the steps are ever reordered or split.
+    """
+    text = _executable(_run(_sync(), "assemble", "Output gates"))
+    assert "make -C api-test" in text or "-C api-test" in text

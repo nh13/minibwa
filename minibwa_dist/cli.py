@@ -107,6 +107,10 @@ def _gates(args: argparse.Namespace) -> int:
     A subcommand rather than two hand-copied heredocs in two workflows: the
     aggregation (`all(...)`) is the whole point of the step, and neither copy
     was reachable by `ruff check minibwa_dist/` or `pytest minibwa_dist/tests`.
+
+    `--repo` defaults to the working directory because the gates step already
+    runs from the assembled checkout; the feature suites need to find the binary
+    they were just built alongside.
     """
     manifest = load_manifest(Path(args.manifest))
     merged: tuple[str, ...] | None = None
@@ -119,6 +123,7 @@ def _gates(args: argparse.Namespace) -> int:
         manifest,
         Path(args.workdir),
         merged=merged,
+        repo=Path(args.repo),
     )
     for result in results:
         print(f"{'PASS' if result.passed else 'FAIL'}  {result.name}: {result.detail}")
@@ -240,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
         "--assembly",
         default=None,
         help="assembly JSON, so coverage names only the features this binary contains",
+    )
+    p.add_argument(
+        "--repo",
+        default=".",
+        help="the assembled checkout; each merged feature's declared test suites are run in it",
     )
     p.set_defaults(func=_gates)
 

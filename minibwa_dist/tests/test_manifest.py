@@ -134,3 +134,43 @@ def test_real_manifest_is_valid() -> None:
     assert all(f.required is False for f in manifest.features[1:]), (
         "only the tooling entry may abort a build"
     )
+
+
+def test_a_feature_can_declare_a_test_suite_directory(tmp_path: Path) -> None:
+    manifest = load_manifest(
+        _write(
+            tmp_path,
+            """
+[[feature]]
+name = "a"
+branch = "feat/a"
+required = false
+output = "identical"
+tests = "test/altlg"
+summary = "a"
+upstream = { status = "unsubmitted" }
+""",
+        )
+    )
+
+    assert manifest.features[0].tests == "test/altlg"
+
+
+def test_the_test_suite_directory_is_optional(tmp_path: Path) -> None:
+    """Most features ship no suite of their own; that must stay legal."""
+    manifest = load_manifest(
+        _write(
+            tmp_path,
+            """
+[[feature]]
+name = "a"
+branch = "feat/a"
+required = false
+output = "identical"
+summary = "a"
+upstream = { status = "unsubmitted" }
+""",
+        )
+    )
+
+    assert manifest.features[0].tests is None

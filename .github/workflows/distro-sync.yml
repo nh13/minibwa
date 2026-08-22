@@ -158,14 +158,23 @@ jobs:
         # `--assembly` scopes the reported coverage to what actually merged: an
         # optional feature that conflicted is not in this binary, and a gate that
         # names it as covered contradicts the drop list this same job publishes.
+        # `--repo .` is the assembled checkout: each merged feature's declared
+        # `tests` directory is run there, which is the only positive-path coverage
+        # the distribution has -- byte-identity is blind to any path a feature
+        # turns ON, because those change output on purpose.
         run: |
           make -j"$(nproc)"
+          # The feature suites shell out to these probes. Built here rather than
+          # inherited from the earlier build step: a gate that depends on another
+          # step's side effect reports "probe not built" -- a build error wearing a
+          # test failure's clothes -- the first time the steps are reordered.
+          make -j"$(nproc)" -C api-test
           git worktree add /tmp/stock master
           make -C /tmp/stock -j"$(nproc)"
           python -m minibwa_dist.cli gates \
             --candidate ./minibwa --stock /tmp/stock/minibwa \
             --fixtures ./test --workdir /tmp/gates \
-            --assembly /tmp/assembly.json
+            --assembly /tmp/assembly.json --repo .
 
       - name: Re-parent dist-next onto dist
         # dist and dist-next are otherwise INDEPENDENT assemblies of the same

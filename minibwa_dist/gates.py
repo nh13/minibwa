@@ -45,6 +45,17 @@ _EXEMPT_HEADERS = (b"@PG", b"@CO")
 # where the habit comes from), and `--outn`/`--outs`/`-N`, because this fixture
 # produces no secondary alignments for them to emit. Secondary-record emission is
 # therefore NOT covered here, and cannot be without a new fixture.
+# Generous: the in-tree ALT suite runs in seconds, but a suite that builds an
+# index over a larger fixture must not be cut off and reported as a failure.
+_SUITE_TIMEOUT_S = 900
+
+
+def _tail(text: str, limit: int = 800) -> str:
+    """The last `limit` characters, which is where a shell suite says why it failed."""
+    text = text.strip()
+    return text if len(text) <= limit else "..." + text[-limit:]
+
+
 _MODES: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("default-flags", (), True),
     ("no-unmapped", ("-u",), True),
@@ -155,6 +166,82 @@ def _modes_are_distinct(stock_digests: dict[str, str]) -> GateResult:
     )
 
 
+def run_feature_suites(
+    repo: Path, manifest: Manifest, merged: tuple[str, ...] | None
+) -> list[GateResult]:
+    """Run the `test-*.sh` suites of every merged feature that declares `tests`.
+
+    This is the positive-path coverage `run_gates` deliberately leaves out. Its
+    byte-identity comparison proves the merge did not disturb stock behaviour,
+    which is the property rerere can silently break -- but it is blind to every
+    path a feature turns ON, because those change output on purpose. A feature's
+    own suites are the only thing that looks at them, and until this existed
+    nothing ran them: `distro-test` covers the Python engine, and the sync
+    compiled the aligner without ever invoking `make test`.
+
+    Scoped to `merged` for the same reason the identity coverage line is: a
+    dropped feature's scripts are not in the tree, so a bare `make test` step
+    would fail with "no rule to make target" rather than a test failure, and
+    reporting it as covered would overstate what this build proved.
+
+    Suites run with `repo` as both the working directory and their sole
+    argument, matching the `[<minibwa-dir>]` convention the in-tree suites
+    already use to locate the binary they exercise.
+    """
+    results: list[GateResult] = []
+    for feature in manifest.features:
+        if feature.tests is None:
+            continue
+        if merged is not None and feature.name not in merged:
+            continue
+        name = f"tests:{feature.name}"
+        directory = repo / feature.tests
+        if not directory.is_dir():
+            results.append(
+                GateResult(
+                    name=name,
+                    passed=False,
+                    detail=f"declared suite directory '{feature.tests}' is not in the build",
+                )
+            )
+            continue
+        scripts = sorted(directory.glob("test-*.sh"))
+        if not scripts:
+            # Zero scripts is a pass over nothing, which is worse than no gate:
+            # it reports coverage that does not exist.
+            results.append(
+                GateResult(name=name, passed=False, detail=f"no test-*.sh in '{feature.tests}'")
+            )
+            continue
+        failures: list[str] = []
+        for script in scripts:
+            try:
+                proc = subprocess.run(
+                    ["sh", str(script), str(repo)],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=_SUITE_TIMEOUT_S,
+                )
+                ok, output = proc.returncode == 0, proc.stdout + proc.stderr
+            except subprocess.TimeoutExpired:
+                ok, output = False, f"timed out after {_SUITE_TIMEOUT_S}s"
+            if not ok:
+                failures.append(f"{script.name}: {_tail(output)}")
+        results.append(
+            GateResult(
+                name=name,
+                passed=not failures,
+                detail=(
+                    f"{len(scripts)} suite(s) passed"
+                    if not failures
+                    else f"{len(failures)} of {len(scripts)} failed -- " + " | ".join(failures)
+                ),
+            )
+        )
+    return results
+
+
 def run_gates(
     candidate_bin: Path,
     stock_bin: Path,
@@ -162,6 +249,7 @@ def run_gates(
     manifest: Manifest,
     workdir: Path,
     merged: tuple[str, ...] | None = None,
+    repo: Path | None = None,
 ) -> list[GateResult]:
     """Run every gate implied by the manifest.
 
@@ -228,6 +316,9 @@ def run_gates(
                     ),
                 )
             )
+
+    if repo is not None:
+        results.extend(run_feature_suites(repo, manifest, merged))
 
     for feature in manifest.features:
         # A dropped changes-output feature is not in the binary, so it has

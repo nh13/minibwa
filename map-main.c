@@ -350,6 +350,7 @@ static ko_longopt_t long_options[] = {
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
 	{ "alt",          ko_required_argument, 316 },
+	{ "no-alt",       ko_no_argument,       319 },
 	{ "alt-records",  ko_no_argument,       317 },
 	{ "alt-lift-tol", ko_required_argument, 318 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
@@ -405,6 +406,7 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    --outn=NUM       output up to {NUM,-N} secondary alignments [0]\n");
 	fprintf(fp, "    --outs=FLOAT     output a secondary hit if score at least FLOAT*bestScore [%g]\n", opt->out_s);
 	fprintf(fp, "    --xa=NUM         if <=NUM hits with score >%g%% of the best hit, output them to XA [%d]\n", opt->out_s*100.0, opt->xa_max);
+	fprintf(fp, "    --no-alt         ignore <idx>.alt; align as if no ALT file exists\n");
 	fprintf(fp, "    --alt FILE       path to the .alt file (default: auto-detected <idx>.alt)\n");
 	fprintf(fp, "    --alt-records    emit ALT-contig alignments with full SEQ\n");
 	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
@@ -451,6 +453,7 @@ int main_map(int argc, char *argv[])
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
 	const char *alt_fn = 0;
+	int32_t no_alt = 0;
 	ketopt_t o = KETOPT_INIT;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 
@@ -528,7 +531,9 @@ int main_map(int argc, char *argv[])
 			alt_fn = o.arg;
 		} else if (c == 317) { // --alt-records
 			mo.flag |= MB_F_ALT_RECORDS;
-				} else if (c == 318) { // --alt-lift-tol
+		} else if (c == 319) { // --no-alt
+			no_alt = 1;
+		} else if (c == 318) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
 		} else if (c == 601) { // --dbg-aln-seq
@@ -582,9 +587,13 @@ int main_map(int argc, char *argv[])
 	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
 	kom_assert(idx, "failed to load the index.");
 	/* Resolve the .alt here rather than inside the loaders, so that --mmap and the
-	 * normal path cannot disagree about whether this index is ALT-aware. */
-	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
-	else mb_idx_set_alt_auto(idx, argv[o.ind]);
+	 * normal path cannot disagree about whether this index is ALT-aware.  --no-alt
+	 * loads nothing at all, which leaves every ALT code path inert -- is_alt is set
+	 * only by l2b_set_alt(), never stored in the index. */
+	if (!no_alt) {
+		if (alt_fn) mb_idx_set_alt(idx, alt_fn);
+		else mb_idx_set_alt_auto(idx, argv[o.ind]);
+	}
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

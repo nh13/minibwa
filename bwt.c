@@ -57,6 +57,15 @@ static uint64_t mb_bwt_data_len(uint64_t len)
 	return bwt_len + occ_len;
 }
 
+/* Upper bound on a trusted-file seq_len (== 2*l_pac for the fwd+RC concatenation).
+ * 2^48 bases is ~7 orders of magnitude beyond any real genome, so a value above
+ * it is a corrupt/hostile .mbw header. Rejecting it before mb_bwt_data_len keeps
+ * the (len+127)/128*4 arithmetic from overflowing into a too-small data_len
+ * (which would under-allocate bwt->data while seq_len stays huge -> OOB reads).
+ * A file that large could never exist, so the read/mmap-length checks reject it
+ * anyway; this just makes the rejection explicit and overflow-safe. */
+#define MB_BWT_MAX_SEQ_LEN (1ULL << 48)
+
 /* BWT layout. Each block consists of u64[4]+u32[8], 64 bytes in total. The
  * lower 56 bits of each u64[4] (see BWT_CNT_SHIFT) store the accumulative
  * count of A/C/G/T bases. The higher 8 bits store the count of A/C/G/T in the
@@ -478,7 +487,7 @@ void mb_bwt_gen_sa(mb_bwt_t *bwt, uint32_t sa_bit)
 	assert(bwt->data);
 	if (bwt->sa) free(bwt->sa);
 	bwt->sa_bit = sa_bit;
-	bwt->n_sa = (bwt->seq_len + (1<<sa_bit)) >> sa_bit;
+	bwt->n_sa = (bwt->seq_len + (1ULL<<sa_bit)) >> sa_bit;
 	bwt->sa = kom_calloc(uint64_t, bwt->n_sa);
 
 	// calculate SA value
@@ -627,17 +636,22 @@ mb_bwt_t *mb_bwt_load_raw(const char *fn)
 int mb_bwt_save(const char *fn, const mb_bwt_t *bwt)
 {
 	FILE *fp;
+	int ok = 1;
 	fp = fopen(fn, "wb");
 	if (fp == 0) return -1;
-	fwrite(MB_MAGIC, 1, 4, fp);
-	fwrite(&bwt->sa_bit, 4, 1, fp);
-	fwrite(&bwt->primary, 8, 1, fp);
-	fwrite(&bwt->L2[1], 8, 4, fp);
-	fwrite(bwt->data, 8, bwt->data_len, fp);
-	fwrite(&bwt->n_sa, 8, 1, fp);
-	if (bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0 && bwt->sa)
-		fwrite(bwt->sa, 8, bwt->n_sa, fp);
-	fclose(fp);
+	ok = ok && fwrite(MB_MAGIC, 1, 4, fp) == 4;
+	ok = ok && fwrite(&bwt->sa_bit, 4, 1, fp) == 1;
+	ok = ok && fwrite(&bwt->primary, 8, 1, fp) == 1;
+	ok = ok && fwrite(&bwt->L2[1], 8, 4, fp) == 4;
+	ok = ok && fwrite(bwt->data, 8, bwt->data_len, fp) == bwt->data_len;
+	ok = ok && fwrite(&bwt->n_sa, 8, 1, fp) == 1;
+	if (ok && bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0 && bwt->sa)
+		ok = ok && fwrite(bwt->sa, 8, bwt->n_sa, fp) == bwt->n_sa;
+	if (fclose(fp) != 0) ok = 0;
+	if (!ok) {
+		fprintf(stderr, "ERROR: failed to write BWT/index file \"%s\" (disk full or write error)\n", fn);
+		return -1;
+	}
 	return 0;
 }
 
@@ -663,6 +677,7 @@ mb_bwt_t *mb_bwt_load(const char *fn)
 	bwt->primary = x[0];
 	memcpy(&bwt->L2[1], &x[1], 32);
 	bwt->seq_len = bwt->L2[4];
+	if (bwt->seq_len > MB_BWT_MAX_SEQ_LEN) { mb_bwt_destroy(bwt); fclose(fp); return NULL; } // corrupt: guards mb_bwt_data_len overflow
 	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
 	bwt->data = kom_calloc(uint64_t, bwt->data_len);
 	read_huge(fp, bwt->data_len << 3, bwt->data);
@@ -686,13 +701,18 @@ mb_bwt_t *mb_bwt_load(const char *fn)
 int mb_bwt_save_sa(const char *fn, const mb_bwt_t *bwt)
 {
 	FILE *fp = fopen(fn, "wb");
+	int ok = 1;
 	if (fp == 0) return -1;
-	fwrite(MB_SA_MAGIC, 1, 4, fp);
-	fwrite(&bwt->sa_bit, 4, 1, fp);
-	fwrite(&bwt->n_sa,   8, 1, fp);
-	if (bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0 && bwt->sa)
-		fwrite(bwt->sa, 8, bwt->n_sa, fp);
-	fclose(fp);
+	ok = ok && fwrite(MB_SA_MAGIC, 1, 4, fp) == 4;
+	ok = ok && fwrite(&bwt->sa_bit, 4, 1, fp) == 1;
+	ok = ok && fwrite(&bwt->n_sa,   8, 1, fp) == 1;
+	if (ok && bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0 && bwt->sa)
+		ok = ok && fwrite(bwt->sa, 8, bwt->n_sa, fp) == bwt->n_sa;
+	if (fclose(fp) != 0) ok = 0;
+	if (!ok) {
+		fprintf(stderr, "ERROR: failed to write SA sidecar file \"%s\" (disk full or write error)\n", fn);
+		return -1;
+	}
 	return 0;
 }
 
@@ -750,6 +770,7 @@ mb_bwt_t *mb_bwt_load_nosa(const char *fn)
 	bwt->primary = x[0];
 	memcpy(&bwt->L2[1], &x[1], 32);
 	bwt->seq_len = bwt->L2[4];
+	if (bwt->seq_len > MB_BWT_MAX_SEQ_LEN) { mb_bwt_destroy(bwt); fclose(fp); return 0; } // corrupt: guards mb_bwt_data_len overflow
 	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
 	bwt->data = kom_calloc(uint64_t, bwt->data_len);
 	read_huge(fp, bwt->data_len << 3, bwt->data);
@@ -782,6 +803,7 @@ mb_bwt_t *mb_bwt_load_mmap(const char *fn, int preload)
 	bwt->primary = *(const uint64_t*)(base + 8);
 	memcpy(&bwt->L2[1], base + 16, 32);
 	bwt->seq_len = bwt->L2[4];
+	if (bwt->seq_len > MB_BWT_MAX_SEQ_LEN) { mb_bwt_destroy(bwt); return 0; } // corrupt: guards mb_bwt_data_len overflow
 	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
 
 	data_off = 48;

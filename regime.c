@@ -276,7 +276,14 @@ int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_reg
 	 * .l2b/.mbw simply skips the native bundled/sidecar regimes instead of
 	 * failing discovery outright. */
 	have_native = stat(fn_l2b, &st_l2b) == 0 && stat(fn_mbw, &st_mbw) == 0;
-	if (have_native && read_u32_at(fn_mbw, 4, &bundled_sa_bit) != 0) have_native = 0;
+	/* A present-but-unreadable .mbw header (truncated/corrupt file) drops the
+	 * native BWT regimes rather than aborting discovery -- the index may still
+	 * offer a cp_occ regime. Warn so the degrade is not silent (the old code
+	 * failed hard here; the fall-through to cp_occ is easy to miss). */
+	if (have_native && read_u32_at(fn_mbw, 4, &bundled_sa_bit) != 0) {
+		if (kom_verbose >= 1) fprintf(stderr, "[WARNING] '%s' is present but its header could not be read; ignoring native BWT regime(s)\n", fn_mbw);
+		have_native = 0;
+	}
 	/* An out-of-range bundled sa_bit (>=32, or the (uint32_t)-1 no-SA sentinel)
 	 * is a corrupt/unusable native header: skip the native regimes rather than
 	 * fail all discovery, before it reaches the 1U<<sa_bit / 1ULL<<sa_bit shifts
@@ -286,7 +293,10 @@ int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_reg
 	if (have_native && bundled_sa_bit >= 32) have_native = 0;
 	/* .mbw header: magic[4], sa_bit u32 @4, primary u64 @8, L2[1..4] 4*u64 @16
 	 * -- L2[4] (== seq_len) is at offset 16 + 3*8 = 40. */
-	if (have_native && read_u64_at(fn_mbw, 40, &seq_len) != 0) have_native = 0;
+	if (have_native && read_u64_at(fn_mbw, 40, &seq_len) != 0) {
+		if (kom_verbose >= 1) fprintf(stderr, "[WARNING] '%s' header is truncated (cannot read seq_len); ignoring native BWT regime(s)\n", fn_mbw);
+		have_native = 0;
+	}
 
 	if (have_native) {
 		l2b_size = (uint64_t)st_l2b.st_size;
@@ -395,14 +405,30 @@ int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_reg
 				g->backend = MB_BACKEND_CP_OCC;
 				g->sa_bit = sa_bit;
 				snprintf(g->name, sizeof g->name, "sa%d-b2", intv);
-				g->est_ram = (uint64_t)st_b2.st_size + (uint64_t)st_pac.st_size + MB_REGIME_MARGIN;
+				/* mb_idx_load_b2 always builds idx->l2b (loaded from a co-located
+				 * .l2b or reconstructed from .pac/.amb/.ann), so charge the
+				 * reference layer too -- otherwise this estimate omits what
+				 * est_ram_for counts for native regimes and the budget check
+				 * compares the two backends on different bases. Fall back to the
+				 * .pac footprint (~2 bits/base -> l2b is ~4x) when no .l2b exists. */
+				g->est_ram = (uint64_t)st_b2.st_size + (uint64_t)st_pac.st_size
+					+ (l2b_size? l2b_size : (uint64_t)st_pac.st_size * 4)
+					+ MB_REGIME_MARGIN;
 				/* +1 places a cp_occ regime just above the same-density BWT
 				 * rung (cp_occ's SMEM search has a per-step edge over
 				 * classic-BWT rank at equal sampling density). The full
-				 * cross-backend grid rank -- e.g. sa16-b2 vs sa8 -- is NOT
-				 * assumed here; it is confirmed by the manual campaign
-				 * measurement pass and these constants should be revisited
-				 * against that data before shipping. */
+				 * cross-backend grid rank -- e.g. sa16-b2 vs sa8 -- was
+				 * confirmed by the manual hg38 campaign (see
+				 * docs/sa-density-and-backends.md): cp_occ adds ~5-12% over
+				 * native at equal density, and cp_occ 1/4 even beats native
+				 * 1/1, so the +1 ordering holds.
+				 *
+				 * Unlike the native ladder (which clamps sa_bit<3 to -1 so
+				 * auto-select never prefers a denser-than-1/8 BWT), cp_occ
+				 * has NO off-frontier clamp ON PURPOSE: the campaign showed
+				 * the denser cp_occ regimes (sa4-b2 at ~1.27x is the value
+				 * sweet spot, beating native 1/1 at a third of the RAM) are
+				 * worth auto-picking when present, so they stay on-frontier. */
 				g->speed_rank = 2 * (6 - sa_bit) + 1;
 				g->mode_mask = MB_MODE_SRPE; /* SR/PE only: not eligible for meth/hic/lr */
 				g->sa_path[0] = '\0';

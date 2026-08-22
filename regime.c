@@ -1,4 +1,5 @@
 #include "regime.h"
+#include "kommon.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +23,19 @@
  * must still be gated by the real budget; otherwise auto-select could pick a
  * dense sidecar under --mmap and OOM. */
 static int mb_regime_mmap_resident(const mb_regime_t *rg, int use_mmap){
-	return use_mmap && rg->sa_path[0] == '\0';
+	/* Only a native bundled-SA regime is truly demand-paged under --mmap
+	 * (mb_bwt_load_mmap). Other backends (e.g. cp_occ) also carry an empty
+	 * sa_path but mb_idx_load_regime heap-loads/reconstructs them regardless of
+	 * --mmap, so they must stay subject to the memory budget. */
+	return use_mmap && rg->backend == MB_BACKEND_BWT && rg->sa_path[0] == '\0';
+}
+
+/* Does this regime fit `budget`? A zero budget means "no constraint determined"
+ * (mb_mem_budget's documented unlimited return), so everything fits; an
+ * mmap-resident regime is demand-paged and budget-exempt; otherwise its
+ * estimated resident RAM must be within budget. */
+static int mb_regime_fits(const mb_regime_t *rg, uint64_t budget, int use_mmap){
+	return budget == 0 || mb_regime_mmap_resident(rg, use_mmap) || rg->est_ram <= budget;
 }
 
 int mb_regime_pick(const mb_regime_t *r, int n, uint64_t budget, uint32_t mode, int use_mmap, const char *forced){
@@ -37,23 +50,23 @@ int mb_regime_pick(const mb_regime_t *r, int n, uint64_t budget, uint32_t mode, 
 	}
 
 	/* Preferred pass: highest speed_rank among mode-eligible, on-frontier
-	 * (speed_rank >= 0) regimes that fit the budget (mmap-resident regimes are
-	 * budget-exempt; sidecar regimes are gated even under --mmap). */
+	 * (speed_rank >= 0) regimes that fit the budget. */
 	for (int i = 0; i < n; ++i) {
 		if (!(r[i].mode_mask & mode)) continue;
 		if (r[i].speed_rank < 0) continue;
-		if (!mb_regime_mmap_resident(&r[i], use_mmap) && r[i].est_ram > budget) continue;
+		if (!mb_regime_fits(&r[i], budget, use_mmap)) continue;
 		if (best < 0 || r[i].speed_rank > r[best].speed_rank) best = i;
 	}
 	if (best >= 0) return best;
 
-	/* Fallback: nothing fit the budget on the preferred pass (or every
-	 * mode-eligible regime is off-frontier) -- auto-pick must never return
-	 * -1 while at least one mode-eligible regime exists, so fall back to
-	 * whichever mode-eligible regime has the smallest est_ram, irrespective
-	 * of rank or budget. */
+	/* Fallback: no on-frontier regime fit, so take the smallest-RAM mode-eligible
+	 * regime that still fits the budget (covers the case where every fitting
+	 * regime is off-frontier). Returns -1 when a real budget is set and nothing
+	 * fits, so the caller reports a clean error instead of loading an OOM-bound
+	 * regime. */
 	for (int i = 0; i < n; ++i) {
 		if (!(r[i].mode_mask & mode)) continue;
+		if (!mb_regime_fits(&r[i], budget, use_mmap)) continue;
 		if (best < 0 || r[i].est_ram < r[best].est_ram) best = i;
 	}
 	return best;
@@ -72,17 +85,47 @@ static uint64_t host_avail_bytes(void){
 	fclose(fp); return 0;
 #endif
 }
+/* cgroup v2 then v1 memory limit, in bytes; 0 means "no limit / not
+ * applicable". Fail-open policy (deliberate): whenever the limit can't be
+ * determined -- no cgroup file at this path (the common case outside a
+ * container: not an error), the explicit v2 "max" sentinel, or a value that
+ * fails to parse or is out of a sane range -- we return 0 (unlimited) so a
+ * broken or absent cgroup never blocks mapping outright; mb_mem_budget()
+ * still has host_avail_bytes() and the optional user cap as backstops. The
+ * silent case (file absent) is normal and stays silent; a file that IS
+ * present but whose value we can't make sense of is an anomaly worth a
+ * diagnostic, so that case warns under kom_verbose instead of failing
+ * silently. */
 static uint64_t cgroup_limit_bytes(void){
-	/* cgroup v2 then v1; "max"/absurd values => no limit (0) */
 	unsigned long long v; FILE *fp;
 	if ((fp=fopen("/sys/fs/cgroup/memory.max","r"))){
-		char b[64]; if (fgets(b,sizeof b,fp)){ fclose(fp);
-			if (!strncmp(b,"max",3)) return 0;
-			v=strtoull(b,0,10); return (v && v < (1ULL<<62))? v : 0; }
+		char b[64];
+		if (fgets(b,sizeof b,fp)){
+			size_t bl;
+			fclose(fp);
+			bl = strlen(b);
+			while (bl > 0 && (b[bl-1] == '\n' || b[bl-1] == '\r')) b[--bl] = '\0'; // trim for a clean warning
+			if (!strncmp(b,"max",3)) return 0; // explicit "no limit" sentinel, not an anomaly
+			v=strtoull(b,0,10);
+			if (v && v < (1ULL<<62)) return v;
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::mb_mem_budget] cgroup v2 memory.max has an unparseable/out-of-range value (\"%s\"); treating as unlimited\n", b);
+			return 0;
+		}
+		if (kom_verbose >= 2)
+			fprintf(stderr, "[W::mb_mem_budget] cgroup v2 memory.max is present but unreadable; treating as unlimited\n");
 		fclose(fp);
 	}
 	if ((fp=fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes","r"))){
-		if (fscanf(fp,"%llu",&v)==1){ fclose(fp); return (v && v < (1ULL<<62))? v : 0; }
+		if (fscanf(fp,"%llu",&v)==1){
+			fclose(fp);
+			if (v && v < (1ULL<<62)) return v;
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes has an out-of-range value (%llu); treating as unlimited\n", v);
+			return 0;
+		}
+		if (kom_verbose >= 2)
+			fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes is present but unparseable; treating as unlimited\n");
 		fclose(fp);
 	}
 	return 0;

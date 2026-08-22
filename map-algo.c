@@ -746,10 +746,23 @@ void mb_reconcile_alt(void *km, const l2b_t *l2b, int n_hit, mb_hit_t *hit, int 
 	for (i = 0; i < n_hit; ++i)
 		pl[i] = mb_hit_place(l2b, &hit[i]);
 
-	/* 2. group by lifted placement.  n_hit is small (a handful), so an O(n^2)
-	 * transitive close-up is cheaper and clearer than a real union-find: assign
-	 * each hit to the lowest-index hit it co-locates with that already has a
-	 * group.  Unliftable hits never match and stay singletons. */
+	/* 2. group by lifted placement via transitive close-up: for each co-locating
+	 * pair in different groups, unite the groups -- but only after an all-cross-
+	 * pairs guard (the t/u loops below) confirms EVERY member pair co-locates AND
+	 * query-overlaps, which is what stops chimeric segments and paralogs from
+	 * drifting together.  Unliftable hits never match and stay singletons.
+	 *
+	 * Complexity: the guard makes a single merge O(n_hit^2), so the loop is
+	 * O(n_hit^4) in the worst case, NOT O(n_hit^2).  In practice it stays near
+	 * O(n_hit^2): (a) n_hit is small -- default max_occ/out_n subsampling caps the
+	 * surviving hits, and even a 40-copy segdup measured n_hit=41; (b) the
+	 * `grp[j]==grp[i]` short-circuit skips within-group pairs, and hits of one
+	 * read that co-locate also query-overlap, so they merge on first contact and
+	 * collapse to one group instead of re-triggering the guard.  A true union-
+	 * find would drop the exponent but cannot express the all-cross-pairs guard
+	 * (it unites on a single edge), so it would merge groups this must keep apart.
+	 * If a profile ever shows this hot, cap n_hit rather than change the grouping
+	 * semantics. */
 	for (i = 0; i < n_hit; ++i) grp[i] = i;            /* initially own group */
 	for (i = 0; i < n_hit; ++i) {
 		if (!pl[i].liftable) continue;

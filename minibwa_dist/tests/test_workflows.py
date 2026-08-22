@@ -613,3 +613,18 @@ def test_the_gates_step_builds_the_api_probes_it_depends_on() -> None:
     """
     text = _executable(_run(_sync(), "assemble", "Output gates"))
     assert "make -C api-test" in text or "-C api-test" in text
+
+
+def test_both_gate_jobs_point_repo_at_the_assembled_tree() -> None:
+    """`--repo` selects where the feature suites are run, and the two jobs lay
+    their workspaces out differently: the x86 job runs from the assembled
+    checkout, while the arm64 job checks out `ops/distro` and builds the
+    candidate in a worktree. A default would silently aim the arm64 gate at the
+    tooling checkout, which carries no suites at all.
+    """
+    x86 = _executable(_run(_sync(), "assemble", "Output gates"))
+    assert "--repo ." in x86
+
+    arm = _executable(_run(_sync(), "gate-arm64", "Re-gate the published assembly on arm64"))
+    assert "--repo /tmp/cand" in arm, "the arm64 gate must run the suites in the candidate tree"
+    assert "/tmp/cand/api-test" in arm, "and must build the probes those suites shell out to"

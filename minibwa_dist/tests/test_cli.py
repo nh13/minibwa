@@ -511,6 +511,8 @@ def test_gates_subcommand_exits_nonzero_when_the_sam_differs(
                 str(fixtures),
                 "--workdir",
                 str(tmp_path / workdir),
+                "--repo",
+                str(tmp_path),
             ]
         )
 
@@ -552,6 +554,8 @@ def test_gates_scope_coverage_to_the_features_this_build_contains(
             str(tmp_path / "work"),
             "--assembly",
             str(assembly),
+            "--repo",
+            str(tmp_path),
         ]
     )
 

@@ -108,9 +108,9 @@ def _gates(args: argparse.Namespace) -> int:
     aggregation (`all(...)`) is the whole point of the step, and neither copy
     was reachable by `ruff check minibwa_dist/` or `pytest minibwa_dist/tests`.
 
-    `--repo` defaults to the working directory because the gates step already
-    runs from the assembled checkout; the feature suites need to find the binary
-    they were just built alongside.
+    `--repo` is where each merged feature's declared test suites are run, and it
+    is required rather than defaulted -- it is not always the working directory,
+    and guessing wrong points the suites at a tree that does not carry them.
     """
     manifest = load_manifest(Path(args.manifest))
     merged: tuple[str, ...] | None = None
@@ -246,9 +246,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="assembly JSON, so coverage names only the features this binary contains",
     )
+    # Required, not defaulted: the two gate jobs lay their workspaces out
+    # differently -- one runs from the assembled checkout, the other from the
+    # tooling checkout with the candidate in a worktree -- so a default silently
+    # aims the suites at a tree that has none. That is not hypothetical; a "."
+    # default did exactly that on the arm64 job the first time this shipped.
     p.add_argument(
         "--repo",
-        default=".",
+        required=True,
         help="the assembled checkout; each merged feature's declared test suites are run in it",
     )
     p.set_defaults(func=_gates)

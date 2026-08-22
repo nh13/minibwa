@@ -356,6 +356,8 @@ jobs:
           fi
           git worktree add /tmp/stock "$BASE"
           make -C /tmp/cand  -j"$(nproc)"
+          # The feature suites shell out to these; see the x86 gate step.
+          make -C /tmp/cand/api-test -j"$(nproc)"
           make -C /tmp/stock -j"$(nproc)"
           # dist-manifest.json carries this build's `merged` list, so coverage names
           # only the features actually in the binary -- same scoping the x86 gate
@@ -363,4 +365,4 @@ jobs:
           python -m minibwa_dist.cli gates \
             --candidate /tmp/cand/minibwa --stock /tmp/stock/minibwa \
             --fixtures /tmp/cand/test --workdir /tmp/gates \
-            --assembly /tmp/cand/dist-manifest.json
+            --assembly /tmp/cand/dist-manifest.json --repo /tmp/cand

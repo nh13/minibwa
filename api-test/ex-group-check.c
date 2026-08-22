@@ -34,12 +34,8 @@ int main(int argc, char *argv[])
 
 	mb_idx_t *idx = mb_idx_load(argv[1], 0);
 	assert(idx);
-	/* mb_idx_load auto-detects <prefix>.alt; reload explicitly to be safe. */
-	{
-		char buf[1024];
-		snprintf(buf, sizeof buf, "%s.alt", argv[1]);
-		mb_idx_set_alt(idx, buf);
-	}
+	/* The loaders do not resolve .alt; the caller does.  This example needs it. */
+	mb_idx_set_alt_auto(idx, argv[1]);
 
 	while (kseq_read(ks) >= 0) {
 		mb_hit_t *hit;

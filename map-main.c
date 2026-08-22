@@ -528,7 +528,7 @@ int main_map(int argc, char *argv[])
 			alt_fn = o.arg;
 		} else if (c == 317) { // --alt-records
 			mo.flag |= MB_F_ALT_RECORDS;
-		} else if (c == 318) { // --alt-lift-tol
+				} else if (c == 318) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
 		} else if (c == 601) { // --dbg-aln-seq
@@ -581,7 +581,10 @@ int main_map(int argc, char *argv[])
 	is_meth = !!(mo.flag & MB_F_METH);
 	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
 	kom_assert(idx, "failed to load the index.");
+	/* Resolve the .alt here rather than inside the loaders, so that --mmap and the
+	 * normal path cannot disagree about whether this index is ALT-aware. */
 	if (alt_fn) mb_idx_set_alt(idx, alt_fn);
+	else mb_idx_set_alt_auto(idx, argv[o.ind]);
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

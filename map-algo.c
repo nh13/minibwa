@@ -36,9 +36,6 @@ mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth)
 	mb_bwt_cache(bwt, 10); // TODO: don't hard code this
 	idx = kom_calloc(mb_idx_t, 1);
 	idx->is_meth = !!is_meth, idx->l2b = l2b, idx->bwt = bwt;
-	/* Auto-detect <prefix>.alt; silently skip if absent. */
-	strcat(strcpy(buf, prefix), ".alt");
-	l2b_set_alt(l2b, buf); /* returns -1 (ENOENT) if absent — ignore */
 end_idx_load:
 	free(buf);
 	return idx;
@@ -72,6 +69,18 @@ end_idx_load_mmap:
 void mb_idx_set_alt(mb_idx_t *idx, const char *fn)
 {
 	if (idx && idx->l2b) l2b_set_alt(idx->l2b, fn);
+}
+
+int mb_idx_set_alt_auto(mb_idx_t *idx, const char *prefix)
+{
+	char *buf;
+	int ret;
+	if (idx == 0 || idx->l2b == 0) return -1;
+	buf = kom_calloc(char, strlen(prefix) + 5);
+	strcat(strcpy(buf, prefix), ".alt");
+	ret = l2b_set_alt(idx->l2b, buf); /* -1 (ENOENT) if absent — the common case */
+	free(buf);
+	return ret;
 }
 
 /* Reference (target) span the hit's CIGAR consumes, as a half-open interval on

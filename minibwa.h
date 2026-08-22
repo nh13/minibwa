@@ -202,6 +202,17 @@ mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth);
 mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload);
 void mb_idx_destroy(mb_idx_t *idx);
 void mb_idx_set_alt(mb_idx_t *idx, const char *fn);
+
+/**
+ * Load <prefix>.alt if it exists beside the index.
+ *
+ * Neither mb_idx_load() nor mb_idx_load_mmap() does this for you: the caller
+ * decides, so that the two loaders cannot disagree about whether a given index
+ * is ALT-aware, and so that a caller wanting stock (non-ALT) behaviour simply
+ * does not call this.  Returns the number of .alt records loaded, or -1 if the
+ * file is absent or unreadable -- the common case, and not an error.
+ */
+int mb_idx_set_alt_auto(mb_idx_t *idx, const char *prefix);
 const char *mb_idx_ctg_name(const mb_idx_t *idx, int32_t tid);
 int64_t mb_idx_ctg_len(const mb_idx_t *idx, int32_t tid);
 

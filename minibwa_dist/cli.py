@@ -15,6 +15,8 @@ from minibwa_dist.assemble import (
     AssemblyError,
     TrainingStop,
     assemble,
+    previously_merged,
+    regressions,
     set_version,
     stamp_dev_version,
 )
@@ -65,6 +67,14 @@ def _sync(args: argparse.Namespace) -> int:
         rerere_cache.save(repo)
 
     version = stamp_dev_version(repo, args.out) if args.stamp else None
+    regressed = (
+        regressions(previously_merged(repo, args.regression_baseline), manifest, result.merged)
+        if args.regression_baseline
+        else ()
+    )
+    # Emit the JSON even when regressed: the caller redirects this to a file and
+    # reads it after the step fails, and a run that fails silently is worse than
+    # the drop it is reporting.
     print(
         json.dumps(
             {
@@ -75,9 +85,19 @@ def _sync(args: argparse.Namespace) -> int:
                 "dropped": [
                     {"name": d.name, "files": list(d.conflicting_files)} for d in result.dropped
                 ],
+                "regressed": list(regressed),
             }
         )
     )
+    if regressed:
+        print(
+            f"REGRESSION: {', '.join(regressed)} merged in the build at "
+            f"'{args.regression_baseline}' and no longer merge. Resolve the conflict with "
+            f"`--stop-at <name>` and publish the resolution to `{rerere_cache.CACHE_BRANCH}`, "
+            "or retire the feature from the manifest if the drop is intended.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -178,6 +198,13 @@ def main(argv: list[str] | None = None) -> int:
         "--stamp",
         action="store_true",
         help="rewrite MB_VERSION so the build identifies itself as downstream",
+    )
+    p.add_argument(
+        "--regression-baseline",
+        default=None,
+        metavar="REF",
+        help="ref whose dist-manifest.json records the previous build; a feature that "
+        "merged there and does not now fails the run",
     )
     p.add_argument(
         "--stop-at",

@@ -550,3 +550,56 @@ def test_the_test_workflow_pins_its_python_tooling() -> None:
     text = _all_run_text(_test_workflow())
     assert re.search(r"pipx install ruff==\d", text)
     assert re.search(r"pip install pytest==\d", text)
+
+
+def test_the_dropped_feature_issue_refreshes_on_a_dedupe_hit() -> None:
+    """A stable title means the dedupe hits whenever *any* drop issue is open.
+
+    The step used to `exit 0` on a hit, so a drop of a different feature set was
+    swallowed by an issue naming an unrelated one -- which is how a real drop
+    reached nobody. The reconciler already edits on a hit; this step must too,
+    and it must refresh the title as well, because the title names the set.
+    """
+    text = _run(_sync(), "assemble", "File an issue for dropped features")
+    assert "gh issue edit" in text, "a dedupe hit must refresh the issue, not drop the update"
+    assert "exit 0" not in _executable(text), "a dedupe hit must not silently skip the update"
+    assert "--title" in text, "the title names the dropped set, so a refresh must update it"
+
+
+def test_the_sync_passes_a_regression_baseline() -> None:
+    """Without it, a feature that merged yesterday and does not today exits zero.
+
+    `origin/dist-next` still holds the previous build at the moment sync runs --
+    this run force-pushes it only afterwards -- so it is the ref that answers
+    "what did the last build contain".
+    """
+    text = _run(_sync(), "assemble", "Assemble dist-next")
+    assert "--regression-baseline origin/dist-next" in _executable(text)
+
+
+def test_the_assembly_json_reaches_the_log_even_when_the_sync_fails() -> None:
+    """A regression exits nonzero, and `bash -e` would abort before the `cat`.
+
+    The run would then go red with the reason only on stderr and the assembly
+    itself -- which features dropped, and what they conflict in -- never shown.
+    Capture the status, print, then exit with it, so a red run is diagnosable
+    from the log alone. The exit code must still propagate: masking it is what
+    the step's own "redirect, do not pipe" note already guards against.
+    """
+    text = _executable(_run(_sync(), "assemble", "Assemble dist-next"))
+    assert "|| rc=$?" in text, "the sync's exit status must be captured, not aborted on"
+    assert "exit $rc" in text, "the captured status must still fail the step"
+    assert text.index("cat /tmp/assembly.json") < text.index("exit $rc")
+
+
+def test_a_hard_assembly_failure_exits_before_the_jq_parsing() -> None:
+    """A required-feature conflict prints no JSON, so the file is empty.
+
+    Falling through to `jq` would then fail the step on a parse error, burying
+    the real cause -- which is on stderr -- under a confusing one. A regression
+    is different: it DOES emit valid JSON, so it must still reach the outputs.
+    """
+    text = _executable(_run(_sync(), "assemble", "Assemble dist-next"))
+    guard = 'jq -e . /tmp/assembly.json'
+    assert guard in text, "a nonzero run with no parsable JSON must exit before jq"
+    assert text.index(guard) < text.index("dropped=$(jq")

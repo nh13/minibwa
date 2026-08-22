@@ -9,12 +9,18 @@ feature-vs-upstream conflicts can be novel.
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from minibwa_dist.gitutil import git, git_ok, stdout
 from minibwa_dist.manifest import Feature, Manifest
+
+# Every sync commits its own assembly JSON here on the assembled branch; it is
+# what the next run reads to answer "what did the last build contain".
+MANIFEST_ARTEFACT = "dist-manifest.json"
 
 
 class AssemblyError(RuntimeError):
@@ -242,6 +248,59 @@ def assemble(
             git(repo, "checkout", "-q", start_ref)
 
     return AssemblyResult(base=base, head=head, merged=tuple(merged), dropped=tuple(dropped))
+
+
+def previously_merged(repo: Path, ref: str) -> frozenset[str] | None:
+    """Feature names the build at `ref` recorded, or None when there is no baseline.
+
+    Reads the `dist-manifest.json` that every sync commits onto the assembled
+    branch, so "what did the last build contain" is answered by the last build
+    itself rather than by re-deriving it.
+
+    Returns None -- deliberately not an empty set -- for a missing ref, a ref
+    with no manifest, and a manifest that will not parse. All three mean
+    "nothing to compare against". An empty set would mean "the last build
+    contained no features", which would report every feature as a regression:
+    a first run, or one corrupt artefact, would wedge the pipeline behind a
+    file the next assembly overwrites anyway.
+    """
+    if not git_ok(repo, "rev-parse", "--verify", f"{ref}^{{commit}}"):
+        return None
+    show = git(repo, "show", f"{ref}:{MANIFEST_ARTEFACT}", check=False)
+    if show.returncode != 0:
+        return None
+    try:
+        recorded = json.loads(show.stdout)["merged"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(recorded, list) or not all(isinstance(n, str) for n in recorded):
+        return None
+    return frozenset(recorded)
+
+
+def regressions(
+    previous: frozenset[str] | None, manifest: Manifest, merged: Iterable[str]
+) -> tuple[str, ...]:
+    """Manifest features that merged in the previous build and do not merge now.
+
+    This is the difference between "has never merged" and "merged yesterday,
+    dropped today". The engine treats both as an ordinary optional-feature drop
+    and exits zero, which is right for the first but hides the second: with the
+    feature excluded the build can match `dist`, the caller short-circuits on
+    "nothing to ship", and the open sync PR goes on advertising a feature the
+    build no longer contains.
+
+    Intersected with the *current* manifest, so retiring a feature -- deleting
+    its `[[feature]]` block once upstream takes it -- is not a regression. It
+    stops appearing in `merged` because it is gone, not because it broke.
+
+    Ordered by the manifest, not by set iteration, so the message a run prints
+    is stable between runs.
+    """
+    if previous is None:
+        return ()
+    now = set(merged)
+    return tuple(f.name for f in manifest.features if f.name in previous and f.name not in now)
 
 
 _MB_VERSION = re.compile(r'^#define MB_VERSION "([^"]+)"', re.M)

@@ -13,6 +13,8 @@
 #define MB_DBG_QNAME       (0x8LL)
 #define MB_DBG_ALN_PE      (0x10LL)
 #define MB_DBG_AN_POS      (0x20LL)
+#define MB_DBG_NO_ALT_PROJ (0x40LL)   // --dbg-no-alt-proj: ablate ALT-seed->primary projection (testing)
+#define MB_DBG_ALT_PROJ    (0x80LL)   // --dbg-alt-proj: trace projected primary anchors (testing)
 
 #define MB_SEED_LONG_JOIN  0x1
 #define MB_SEED_IGNORE     0x2
@@ -71,7 +73,11 @@ void mb_set_parent(void *km, float mask_level, int mask_len, int n, mb_hit_t *r,
 int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5);
 void mb_hit_sort(void *km, int *n_regs, mb_hit_t *r);
 void mb_sync_hits(void *km, int n_regs, mb_hit_t *regs);
-void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_, mb_hit_t *r);
+void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_, mb_hit_t *r,
+                   const l2b_t *l2b, int lift_tol);
+int mb_any_alt(int n_hit, const mb_hit_t *hit);
+int mb_places_colocate(const mb_place_t *a, const mb_place_t *b, int lift_tol);
+void mb_reconcile_alt(void *km, const l2b_t *l2b, int n_hit, mb_hit_t *hit, int sub_diff, int lift_tol);
 void mb_filter_hits(const mb_opt_t *opt, int qlen, int *n_regs, mb_hit_t *regs);
 int mb_squeeze_a(void *km, int n_regs, mb_hit_t *regs, mb_anchor_t *a);
 void mb_split_hit(mb_hit_t *r, mb_hit_t *r2, int n, int qlen, mb_anchor_t *a, const l2b_t *l2b);

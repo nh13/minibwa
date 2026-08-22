@@ -135,11 +135,12 @@ def _gates(args: argparse.Namespace) -> int:
     )
     for result in results:
         print(f"{'PASS' if result.passed else 'FAIL'}  {result.name}: {result.detail}")
-    if args.repo is None and any(f.tests for f in manifest.features):
+    unrun = [f.name for f in manifest.features if f.tests and (merged is None or f.name in merged)]
+    if args.repo is None and unrun:
         # Not a gate result: it did not run, so it neither passed nor failed.
         # Said out loud all the same -- unrun coverage that looks like absent
         # coverage is how a gate quietly stops meaning anything.
-        print("NOTE  feature suites not run (--repo not given)")
+        print(f"NOTE  feature suites not run (--repo not given): {', '.join(unrun)}")
     return 0 if all(result.passed for result in results) else 1
 
 

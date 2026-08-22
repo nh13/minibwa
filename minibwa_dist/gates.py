@@ -45,17 +45,6 @@ _EXEMPT_HEADERS = (b"@PG", b"@CO")
 # where the habit comes from), and `--outn`/`--outs`/`-N`, because this fixture
 # produces no secondary alignments for them to emit. Secondary-record emission is
 # therefore NOT covered here, and cannot be without a new fixture.
-# Generous: the in-tree ALT suite runs in seconds, but a suite that builds an
-# index over a larger fixture must not be cut off and reported as a failure.
-_SUITE_TIMEOUT_S = 900
-
-
-def _tail(text: str, limit: int = 800) -> str:
-    """The last `limit` characters, which is where a shell suite says why it failed."""
-    text = text.strip()
-    return text if len(text) <= limit else "..." + text[-limit:]
-
-
 _MODES: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("default-flags", (), True),
     ("no-unmapped", ("-u",), True),
@@ -63,6 +52,26 @@ _MODES: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("eqx-cigar", ("--eqx",), True),
     ("single-end", (), False),
 )
+
+
+# Bounded by the job, not by generosity: both gate jobs in distro-sync.yml cap at
+# `timeout-minutes: 60`, and this budget applies to each of a feature's suites in
+# turn. A value the whole set can outlast is a guard that never fires -- the
+# runner kills the job first and prints nothing at all. 120s x 20 suites is 40
+# minutes, leaving the builds and the byte-identity comparison the rest; the
+# in-tree ALT suites finish in seconds, so this is still enormous slack per
+# suite. `test_the_suite_timeout_fits_inside_the_job_timeout` holds the bound.
+_SUITE_TIMEOUT_S = 120
+
+# Enough failures to see the pattern, not so many that one gate line is a log
+# dump: 15 failing suites at 800 characters each is a 12KB single line.
+_MAX_REPORTED_FAILURES = 3
+
+
+def _tail(text: str, limit: int = 800) -> str:
+    """The last `limit` characters, which is where a shell suite says why it failed."""
+    text = text.strip()
+    return text if len(text) <= limit else "..." + text[-limit:]
 
 
 def _gate_name(label: str) -> str:
@@ -235,7 +244,13 @@ def run_feature_suites(
                 detail=(
                     f"{len(scripts)} suite(s) passed"
                     if not failures
-                    else f"{len(failures)} of {len(scripts)} failed -- " + " | ".join(failures)
+                    else f"{len(failures)} of {len(scripts)} failed -- "
+                    + " | ".join(failures[:_MAX_REPORTED_FAILURES])
+                    + (
+                        f" (+{len(failures) - _MAX_REPORTED_FAILURES} more)"
+                        if len(failures) > _MAX_REPORTED_FAILURES
+                        else ""
+                    )
                 ),
             )
         )

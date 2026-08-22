@@ -258,7 +258,13 @@ jobs:
           fi
 
       - name: File an issue for dropped features
-        if: steps.assemble.outputs.dropped != '[]' && steps.assemble.outputs.dropped != ''
+        # `always()`, because a REGRESSION fails the assemble step and would
+        # otherwise skip the one issue naming which features dropped and what they
+        # conflict in. That step writes its outputs before exiting precisely so
+        # this can still run. A regression therefore files this issue AND the
+        # generic `sync: run failed` one: different titles, different information,
+        # neither dedups against the other.
+        if: always() && steps.assemble.outputs.dropped != '[]' && steps.assemble.outputs.dropped != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -282,8 +288,13 @@ jobs:
           # the open issue instead of skipping, the way distro-reconcile.yml does,
           # and refresh the TITLE too: it names the set, so a stale one misreports
           # which features are actually missing from the build.
-          NUM=$(gh issue list --state open --search "sync: dropped in:title" --json number \
-                  --jq '.[0].number // empty')
+          # Token-matched search, then an exact client-side shape check: `gh issue
+          # edit` rewrites title AND body, so a loose match would clobber an
+          # unrelated issue that merely shares two common words. The previous form
+          # was immune only because a false hit just skipped the update.
+          NUM=$(gh issue list --state open --search "sync: dropped in:title" --json number,title \
+                  --jq '[.[] | select((.title | startswith("sync: dropped ")) and
+                                      (.title | endswith(" -- would not merge")))][0].number // empty')
           if [ -n "$NUM" ]; then
             gh issue edit "$NUM" --title "$TITLE" --body "$BODY"
           else

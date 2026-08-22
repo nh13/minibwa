@@ -10,6 +10,7 @@
 #include "kthread.h"
 #include "ketopt.h"
 #include "kseq.h"
+#include "regime.h"
 KSTREAM_INIT(gzFile, gzread, 0x10000)
 
 typedef struct {
@@ -560,30 +561,50 @@ int main_map(int argc, char *argv[])
 				fprintf(stderr, "[WARNING]\033[1;31m -b only takes 'cs', 'ds' or 'MD'. Invalid values are assumed to be 'cs'.\033[0m\n");
 			}
 		} else if (c == 901) { // --version
+			if (hdr_ins.s) free(hdr_ins.s);
 			puts(MB_VERSION);
 			exit(0);
 		} else if (c == 902) { // --help
+			if (hdr_ins.s) free(hdr_ins.s);
 			return usage_map(stdout, &mo);
 		}
 	}
 	if (mo.flag & MB_F_NO_ALN) mo.flag |= MB_F_NO_PAIRING | MB_F_PAF;
-	if (argc - o.ind < 2)
+	// --list-regimes only needs the index prefix; every other mode also needs >=1 read file
+	if (argc - o.ind < (list_regimes? 1 : 2))
 		return usage_map(stderr, &mo);
 
 	is_meth = !!(mo.flag & MB_F_METH);
 	{
 		mb_regime_t rgs[16];
 		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
-		int nrg = mb_regime_discover(argv[o.ind], /*b2_available=*/0, rgs, 16);
-		if (list_regimes) { mb_regime_list_print(stdout, rgs, nrg); return 0; }
+		int nrg = mb_regime_discover(argv[o.ind], is_meth, /*b2_available=*/0, rgs, 16);
+		if (list_regimes) {
+			if (nrg == 0) {
+				fprintf(stderr, "[ERROR] index not found (missing .l2b/.mbw); build one with 'minibwa index'\n");
+				if (hdr_ins.s) free(hdr_ins.s);
+				return 1;
+			}
+			mb_regime_list_print(stdout, rgs, nrg);
+			if (hdr_ins.s) free(hdr_ins.s);
+			return 0;
+		}
 		kom_assert(nrg > 0, "index not found (missing .l2b/.mbw); build one with 'minibwa index'");
-		/* --mmap demand-pages the index rather than residing it, so the
-		 * memory budget that gates a resident load doesn't apply: bypass it
-		 * with an unlimited budget so the fastest (bundled) regime wins. */
-		uint64_t budget = use_mmap ? (uint64_t)-1 : mb_mem_budget(index_mem_cap);
-		int pick = mb_regime_pick(rgs, nrg, budget, mode, forced_regime);
+		/* Always compute the real budget. mb_regime_pick applies it correctly per
+		 * regime under --mmap: a bundled regime is demand-paged (budget-exempt),
+		 * but a sidecar regime heap-loads its SA even under mmap and stays gated,
+		 * so auto-select can't pick a dense sidecar under --mmap and OOM. */
+		uint64_t budget = mb_mem_budget(index_mem_cap);
+		int pick = mb_regime_pick(rgs, nrg, budget, mode, use_mmap, forced_regime);
+		if (pick < 0 && forced_regime) {
+			fprintf(stderr, "[ERROR] unknown or unavailable index regime '%s' (see 'minibwa map --list-regimes <idx>' for available regimes)\n", forced_regime);
+			if (hdr_ins.s) free(hdr_ins.s);
+			return 1;
+		}
 		kom_assert(pick >= 0, "no index regime fits the memory budget (try --index-mem or build a sparser -u)");
-		if (!use_mmap && rgs[pick].est_ram > budget)
+		/* Warn only if the selected regime actually resides in RAM beyond the
+		 * budget. A bundled regime under --mmap is demand-paged, so it never does. */
+		if (!(use_mmap && rgs[pick].sa_path[0] == '\0') && rgs[pick].est_ram > budget)
 			fprintf(stderr, "[M::regime] warning: selected '%s' (est %.1f GB) exceeds the memory budget (%.1f GB)\n",
 			        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
 		if (kom_verbose >= 3)

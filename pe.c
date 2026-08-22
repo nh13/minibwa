@@ -25,16 +25,19 @@ static inline int mb_insert_dir(const mb_hit_t *h0, const mb_hit_t *h1, int64_t 
  * NOT distinct (same locus).  An UNLIFTABLE hit is NOT a protected distinct group:
  * it returns 0 here so it falls through to normal demotion (preserving baseline
  * behavior and not shielding spurious hits). */
-static inline int mb_distinct_lifted_group(const l2b_t *l2b, const mb_hit_t *a, const mb_hit_t *b, int lift_tol)
+/* As mb_distinct_lifted_group() but with b's placement precomputed, so a caller
+ * that tests many `a` against a fixed `b` (the pair-chosen endpoint) does not
+ * recompute mb_hit_place(b) on every iteration. */
+static inline int mb_distinct_lifted_group_pb(const l2b_t *l2b, const mb_hit_t *a, const mb_place_t *pb, int lift_tol)
 {
-	mb_place_t pa = mb_hit_place(l2b, a), pb = mb_hit_place(l2b, b);
-	if (!pa.liftable || !pb.liftable) return 0;          /* unliftable -> NOT a protected distinct group */
+	mb_place_t pa = mb_hit_place(l2b, a);
+	if (!pa.liftable || !pb->liftable) return 0;         /* unliftable -> NOT a protected distinct group */
 	/* Distinct (protected) iff they do NOT co-locate: no shared lifted
 	 * sub-interval (different pri_tid, opposite strand, or all sub-placements
 	 * > lift_tol apart).  A breakpoint-spanning ALT hit that shares a
 	 * sub-interval with its primary twin is NOT distinct (same locus -> may be
 	 * demoted), while two genuine paralog loci stay protected. */
-	return !mb_places_colocate(&pa, &pb, lift_tol);
+	return !mb_places_colocate(&pa, pb, lift_tol);
 }
 
 static inline double mb_pair_score(const mb_hit_t *h0, const mb_hit_t *h1, const mb_pestat_t pes[4], int32_t match_sc)
@@ -654,6 +657,10 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 			 * this mate actually has ALT hits, so a reference with no .alt loaded is
 			 * byte-identical (mb_any_alt is false => no behavior change). */
 			int r_any_alt = mb_any_alt(n_hit[r], hit[r]);
+			/* q == h[r] is invariant across the loop, so lift its placement once
+			 * rather than recomputing it (a CIGAR walk + lift searches) per hit. */
+			mb_place_t pq;
+			if (r_any_alt) pq = mb_hit_place(l2b, h[r]);
 			for (i = 0; i < n_hit[r]; ++i) { // handle other chimeric hits
 				const mb_hit_t *q = h[r];
 				mb_hit_t *p = &hit[r][i];
@@ -668,7 +675,7 @@ void mb_pair(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], 
 					 * inflate MAPQ, undoing the Task-4 paralog guard for PE.  Skip the
 					 * demotion across distinct groups.  Gated on r_any_alt so the
 					 * no-.alt baseline is unchanged. */
-					if (r_any_alt && mb_distinct_lifted_group(l2b, p, q, opt->lift_tol))
+					if (r_any_alt && mb_distinct_lifted_group_pb(l2b, p, &pq, opt->lift_tol))
 						continue;
 					if (ol > opt->mask_level * (p->qe - p->qs)) { // if p overlaps with h[r] a lot, make it a secondary hit
 						for (j = 0; j < n_hit[r]; ++j) // FIXME: quadratic time complexity, but almost never an issue on real data

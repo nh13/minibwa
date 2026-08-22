@@ -661,3 +661,58 @@ def test_sync_without_the_flag_reports_no_regressions(
 
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["regressed"] == []
+
+
+def test_gates_without_repo_reports_that_the_suites_did_not_run(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--repo` must stay optional, and its absence must be visible.
+
+    The engine and the workflow file update at different times: every sync
+    checks out the freshly assembled `dist-next` and runs THAT `minibwa_dist`,
+    while the YAML executing comes from `dist` and only changes when a build is
+    shipped. So a new required argument is demanded by the engine one sync
+    before the workflow can supply it, and the gates step dies on argparse
+    before the ship that would fix it. Optional-and-loud is the only shape that
+    survives that gap.
+    """
+    manifest = _write_manifest(
+        tmp_path,
+        """
+[[feature]]
+name = "x"
+branch = "feat/x"
+required = false
+output = "identical"
+tests = "test/x"
+summary = "x"
+upstream = { status = "unsubmitted" }
+""",
+    )
+    sam = "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n"
+    binary = stub_aligner(tmp_path / "mb", sam)
+    fixtures = tmp_path / "fx"
+    fixtures.mkdir()
+    for f in ("chrM-human.fa.gz", "chrM-read_1.fa.gz", "chrM-read_2.fa.gz"):
+        (fixtures / f).write_bytes(b"")
+
+    rc = main(
+        [
+            "--manifest",
+            str(manifest),
+            "gates",
+            "--candidate",
+            str(binary),
+            "--stock",
+            str(binary),
+            "--fixtures",
+            str(fixtures),
+            "--workdir",
+            str(tmp_path / "wd"),
+        ]
+    )
+
+    assert rc == 0, "a missing --repo must not fail the build"
+    out = capsys.readouterr().out
+    assert "tests:x" not in out
+    assert "--repo not given" in out, "skipping the suites silently is the failure being avoided"

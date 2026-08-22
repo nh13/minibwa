@@ -531,11 +531,11 @@ int main_map(int argc, char *argv[])
 			alt_fn = o.arg;
 		} else if (c == 317) { // --alt-records
 			mo.flag |= MB_F_ALT_RECORDS;
-		} else if (c == 319) { // --no-alt
-			no_alt = 1;
 		} else if (c == 318) { // --alt-lift-tol
 			mo.lift_tol = atoi(o.arg);
 			if (mo.lift_tol < 0) mo.lift_tol = 0;
+		} else if (c == 319) { // --no-alt
+			no_alt = 1;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -591,8 +591,14 @@ int main_map(int argc, char *argv[])
 	 * loads nothing at all, which leaves every ALT code path inert -- is_alt is set
 	 * only by l2b_set_alt(), never stored in the index. */
 	if (!no_alt) {
-		if (alt_fn) mb_idx_set_alt(idx, alt_fn);
-		else mb_idx_set_alt_auto(idx, argv[o.ind]);
+		/* An absent adjacent .alt is the normal case, so the auto branch ignores its
+		 * status.  An explicitly named one that will not load is a user error. */
+		if (alt_fn) {
+			if (mb_idx_set_alt(idx, alt_fn) < 0) {
+				fprintf(stderr, "[ERROR] failed to load the ALT file '%s'\n", alt_fn);
+				return 1;
+			}
+		} else mb_idx_set_alt_auto(idx, argv[o.ind]);
 	}
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
@@ -708,6 +714,7 @@ int main_mem(int argc, char *argv[])
 
 	idx = mb_idx_load(argv[o.ind], !!(mo.flag & MB_F_METH));
 	kom_assert(idx, "failed to load the index.");
+	mb_idx_set_alt_auto(idx, argv[o.ind]); /* as main_map does; the loader no longer resolves it */
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

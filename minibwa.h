@@ -201,7 +201,9 @@ extern "C" {
 mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth);
 mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload);
 void mb_idx_destroy(mb_idx_t *idx);
-void mb_idx_set_alt(mb_idx_t *idx, const char *fn);
+/* Load an ALT file from an explicit path.  Returns as l2b_set_alt() does:
+ * the number of ALT records parsed, or -1 if the file cannot be read. */
+int mb_idx_set_alt(mb_idx_t *idx, const char *fn);
 
 /**
  * Load <prefix>.alt if it exists beside the index.

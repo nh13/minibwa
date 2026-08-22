@@ -66,9 +66,10 @@ end_idx_load_mmap:
 	return idx;
 }
 
-void mb_idx_set_alt(mb_idx_t *idx, const char *fn)
+int mb_idx_set_alt(mb_idx_t *idx, const char *fn)
 {
-	if (idx && idx->l2b) l2b_set_alt(idx->l2b, fn);
+	if (idx == 0 || idx->l2b == 0) return -1;
+	return l2b_set_alt(idx->l2b, fn);
 }
 
 int mb_idx_set_alt_auto(mb_idx_t *idx, const char *prefix)

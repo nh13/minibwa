@@ -18,6 +18,11 @@
 #      Before .alt resolution moved into the caller, mb_idx_load auto-detected
 #      <prefix>.alt but mb_idx_load_mmap did not, so --mmap silently disabled
 #      ALT-awareness on the very same index.  This check is that regression.
+#   5. mem parity -- the bwa-compat `mem` subcommand resolves .alt as `map` does.
+#      Moving resolution out of mb_idx_load() and into the caller is easy to do
+#      for one caller and forget for the other; `mem` is the other one.
+#   6. Bad --alt   -- an explicitly named .alt that cannot be read is an error,
+#      not a silent fallback to stock behaviour.
 #
 # Usage: test/altlg/test-noalt.sh [<minibwa-dir>]
 set -eu
@@ -125,6 +130,48 @@ ok "--mmap matches the normal loader with ALT on"
 cmp -s "$TMPD/mmap-off.body" "$TMPD/alt-off.body" \
 	|| fail "--mmap changed the alignment records under --no-alt"
 ok "--mmap matches the normal loader under --no-alt"
+
+# ============================================================
+# 5. `mem` resolves .alt the same way `map` does
+# ============================================================
+echo "== bwa-compat \`mem\` parity =="
+"$MINIBWA" mem "$TMPD/ref.fa" "$TMPD/r1.fq" 2>/dev/null > "$TMPD/mem-on.sam" \
+	|| fail "minibwa mem failed on the ALT fixture"
+[ -s "$TMPD/mem-on.sam" ] || fail "minibwa mem produced no output"
+
+mq_mem=$(primary_mapq "$TMPD/mem-on.sam")
+[ "${mq_mem:-}" = "$mq_on" ] \
+	|| fail "mem: primary MAPQ is '${mq_mem:-<none>}', but map gives '$mq_on' -- mem is not resolving <idx>.alt"
+ok "mem: primary MAPQ $mq_mem matches map (both resolve the adjacent .alt)"
+
+# And with the .alt gone, mem must degrade exactly as map does -- otherwise the
+# check above could pass for a reason unrelated to .alt resolution.
+mv "$TMPD/ref.fa.alt" "$TMPD/hidden.alt"
+"$MINIBWA" mem "$TMPD/ref.fa" "$TMPD/r1.fq" 2>/dev/null > "$TMPD/mem-absent.sam" \
+	|| fail "minibwa mem failed with no .alt present"
+mv "$TMPD/hidden.alt" "$TMPD/ref.fa.alt"
+mq_mem_absent=$(primary_mapq "$TMPD/mem-absent.sam")
+[ "${mq_mem_absent:-}" = "$mq_off" ] \
+	|| fail "mem without .alt: primary MAPQ is '${mq_mem_absent:-<none>}', expected '$mq_off'"
+ok "mem without .alt: primary MAPQ $mq_mem_absent matches map --no-alt"
+
+# ============================================================
+# 6. An unreadable --alt FILE is an error, not a silent fallback
+# ============================================================
+echo "== unreadable --alt FILE =="
+# Exit status is deliberately not asserted: this branch is based before upstream
+# r422 (#67), where main() discarded every subcommand's return value.  Assert on
+# the diagnostic and on the absence of output instead, both of which are stable.
+"$MINIBWA" map --outn=5 --alt "$TMPD/does-not-exist.alt" \
+	"$TMPD/ref.fa" "$TMPD/r1.fq" > "$TMPD/bad-alt.sam" 2> "$TMPD/bad-alt.err" || true
+
+grep -q 'failed to load the ALT file' "$TMPD/bad-alt.err" \
+	|| fail "--alt with an unreadable path printed no diagnostic (stderr: $(cat "$TMPD/bad-alt.err"))"
+ok "--alt with an unreadable path reports the failure"
+
+[ ! -s "$TMPD/bad-alt.sam" ] \
+	|| fail "--alt with an unreadable path still emitted alignments; it silently fell back to stock behaviour"
+ok "--alt with an unreadable path emits no alignments"
 
 echo "[test-noalt] PASS"
 exit 0

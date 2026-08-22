@@ -61,7 +61,8 @@ void l2b_meth_convert(l2b_meth_t mt, int64_t len, uint8_t *seq);
 
 /* Load an ALT file (SAM), set l2b_ctg_t.is_alt and populate lift[] blocks for each
  * ALT contig.  Safe to call multiple times (re-entrant: frees old lift[] first).
- * Returns the number of ALT contigs found, or -1 on file error. */
+ * Returns the number of ALT records parsed (a contig may carry several; the
+ * contig count is l2b->n_alt_ctg), or -1 on file error. */
 int l2b_set_alt(l2b_t *l2b, const char *fn);
 
 /* Map (alt_tid, alt_pos) to (pri_tid, pri_pos).  alt_pos is 0-based.

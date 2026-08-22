@@ -559,3 +559,101 @@ def test_gates_scope_coverage_to_the_features_this_build_contains(
     detail = capsys.readouterr().out
     assert "1 feature(s) covered: kept" in detail
     assert "1 not in this build: dropped" in detail
+
+
+# --- a feature that merged in the previous build and does not now ---
+
+
+def _record_previous_build(repo: Path, ref: str, merged: list[str]) -> None:
+    """Commit a prior build's assembly JSON on `ref`, the way sync itself does."""
+    run(repo, "checkout", "-q", "-B", ref, "master")
+    commit_file(repo, "dist-manifest.json", json.dumps({"merged": merged, "dropped": []}), "record")
+    run(repo, "checkout", "-q", "master")
+
+
+_ONE_CONFLICTING_FEATURE = """
+[[feature]]
+name = "x"
+branch = "feat/x"
+required = false
+output = "identical"
+summary = "x"
+upstream = { status = "unsubmitted" }
+"""
+
+
+def test_sync_fails_when_a_feature_stops_merging(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The drop is a regression: the previous build had it, this one does not.
+
+    Exiting zero here is what let a real drop pass unnoticed -- the build then
+    matched `dist`, the caller short-circuited on "nothing to ship", and the
+    open sync PR kept advertising the feature.
+    """
+    conflicting_branch(repo, "feat/x")
+    _record_previous_build(repo, "dist-prev", ["x"])
+    manifest = _write_manifest(tmp_path, _ONE_CONFLICTING_FEATURE)
+
+    rc = main(_sync_argv(manifest, repo, "--regression-baseline", "dist-prev"))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["regressed"] == ["x"]
+    assert "x" in captured.err
+
+
+def test_sync_still_emits_the_assembly_json_when_it_fails(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The caller redirects stdout to a file and reads it after the step fails."""
+    conflicting_branch(repo, "feat/x")
+    _record_previous_build(repo, "dist-prev", ["x"])
+    manifest = _write_manifest(tmp_path, _ONE_CONFLICTING_FEATURE)
+
+    main(_sync_argv(manifest, repo, "--regression-baseline", "dist-prev"))
+
+    out = json.loads(capsys.readouterr().out)
+    assert [d["name"] for d in out["dropped"]] == ["x"]
+    assert out["merged"] == []
+
+
+def test_sync_succeeds_when_a_never_merged_feature_is_dropped_again(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A feature that did not merge last time either is not a regression."""
+    conflicting_branch(repo, "feat/x")
+    _record_previous_build(repo, "dist-prev", [])
+    manifest = _write_manifest(tmp_path, _ONE_CONFLICTING_FEATURE)
+
+    rc = main(_sync_argv(manifest, repo, "--regression-baseline", "dist-prev"))
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["regressed"] == []
+
+
+def test_sync_succeeds_with_no_baseline_ref(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """First run: nothing to compare against, so nothing can have regressed."""
+    conflicting_branch(repo, "feat/x")
+    manifest = _write_manifest(tmp_path, _ONE_CONFLICTING_FEATURE)
+
+    rc = main(_sync_argv(manifest, repo, "--regression-baseline", "no-such-branch"))
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["regressed"] == []
+
+
+def test_sync_without_the_flag_reports_no_regressions(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The flag is opt-in; omitting it must not change the exit code."""
+    conflicting_branch(repo, "feat/x")
+    _record_previous_build(repo, "dist-prev", ["x"])
+    manifest = _write_manifest(tmp_path, _ONE_CONFLICTING_FEATURE)
+
+    rc = main(_sync_argv(manifest, repo))
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["regressed"] == []

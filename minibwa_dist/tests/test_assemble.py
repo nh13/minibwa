@@ -11,6 +11,8 @@ from minibwa_dist.assemble import (
     TrainingStop,
     UnknownStopTarget,
     assemble,
+    previously_merged,
+    regressions,
     set_version,
     stamp_dev_version,
 )
@@ -421,3 +423,86 @@ def test_set_version_refuses_a_header_without_the_define(repo: Path) -> None:
     (repo / "minibwa.h").write_text("#define OTHER 1\n")
     with pytest.raises(RuntimeError, match="MB_VERSION"):
         set_version(repo, "0.6-nh13.1")
+
+
+# --- regression detection: a feature that merged yesterday and does not today ---
+
+
+def _record_build(repo: Path, ref: str, payload: str) -> None:
+    """Commit `payload` as dist-manifest.json on `ref`, then return to master."""
+    run(repo, "checkout", "-q", "-B", ref, "master")
+    commit_file(repo, "dist-manifest.json", payload, f"record build on {ref}")
+    run(repo, "checkout", "-q", "master")
+
+
+def test_previously_merged_reads_the_recorded_feature_names(repo: Path) -> None:
+    _record_build(repo, "dist-next", '{"merged": ["a", "b"], "dropped": []}')
+
+    assert previously_merged(repo, "dist-next") == frozenset({"a", "b"})
+
+
+def test_previously_merged_is_none_on_a_missing_ref(repo: Path) -> None:
+    """A first run has no baseline. It must not read as "everything regressed"."""
+    assert previously_merged(repo, "no-such-branch") is None
+
+
+def test_previously_merged_is_none_when_the_ref_carries_no_manifest(repo: Path) -> None:
+    assert previously_merged(repo, "master") is None
+
+
+def test_previously_merged_is_none_on_a_malformed_manifest(repo: Path) -> None:
+    """A corrupt artefact is "nothing to compare against", not a regression.
+
+    Failing the build here would wedge every subsequent run behind a bad file
+    that the next assembly would have overwritten anyway.
+    """
+    _record_build(repo, "dist-next", "{not json at all")
+
+    assert previously_merged(repo, "dist-next") is None
+
+
+def test_previously_merged_is_none_when_merged_is_not_a_list_of_names(repo: Path) -> None:
+    _record_build(repo, "dist-next", '{"merged": "a", "dropped": []}')
+
+    assert previously_merged(repo, "dist-next") is None
+
+
+def test_regressions_reports_a_feature_that_stopped_merging() -> None:
+    manifest = Manifest(features=(_feature("a", "feat/a"), _feature("b", "feat/b")), withdrawn=())
+
+    assert regressions(frozenset({"a", "b"}), manifest, ("a",)) == ("b",)
+
+
+def test_regressions_ignores_a_feature_retired_from_the_manifest() -> None:
+    """Deleting a [[feature]] block once upstream takes it is deliberate.
+
+    The feature stops appearing in `merged` because it is gone, not because it
+    broke, so comparing against the previous build alone would report every
+    graduation as a regression.
+    """
+    manifest = Manifest(features=(_feature("a", "feat/a"),), withdrawn=())
+
+    assert regressions(frozenset({"a", "b"}), manifest, ("a",)) == ()
+
+
+def test_regressions_ignores_a_feature_that_never_merged() -> None:
+    """A feature that was dropped before and is dropped now is not new news."""
+    manifest = Manifest(features=(_feature("a", "feat/a"), _feature("b", "feat/b")), withdrawn=())
+
+    assert regressions(frozenset({"a"}), manifest, ("a",)) == ()
+
+
+def test_regressions_are_empty_without_a_baseline() -> None:
+    manifest = Manifest(features=(_feature("a", "feat/a"),), withdrawn=())
+
+    assert regressions(None, manifest, ()) == ()
+
+
+def test_regressions_are_reported_in_manifest_order() -> None:
+    """Manifest order, not set order, so the message is stable run to run."""
+    manifest = Manifest(
+        features=(_feature("a", "feat/a"), _feature("b", "feat/b"), _feature("c", "feat/c")),
+        withdrawn=(),
+    )
+
+    assert regressions(frozenset({"a", "b", "c"}), manifest, ()) == ("a", "b", "c")

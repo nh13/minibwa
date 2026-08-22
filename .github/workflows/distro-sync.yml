@@ -97,9 +97,27 @@ jobs:
         id: assemble
         # Redirect, do not pipe: `| tee` would mask a nonzero exit from the CLI.
         run: |
+          # `origin/dist-next` still holds the PREVIOUS build here -- this run
+          # force-pushes it only further down -- so it is what answers "what did
+          # the last build contain". A feature that merged there and does not now
+          # is a regression, and fails the run rather than quietly shrinking the
+          # build. See minibwa_dist/assemble.py:regressions().
+          # Capture rather than abort on: `bash -e` would end the step here, and a
+          # regression's whole value is knowing WHICH features dropped and what
+          # they conflict in. Print the assembly, then exit with the real status
+          # further down -- masking it is what the note above already warns about.
+          rc=0
           python -m minibwa_dist.cli sync --repo . --base master --out dist-next \
-            --remote origin --stamp > /tmp/assembly.json
+            --remote origin --stamp --regression-baseline origin/dist-next \
+            > /tmp/assembly.json || rc=$?
           cat /tmp/assembly.json
+          # A hard failure (a required feature conflicting, a missing branch)
+          # prints no JSON at all, so the jq below would fail the step on a parse
+          # error and bury the real cause. A REGRESSION does emit valid JSON, and
+          # must fall through to the outputs.
+          if [ "$rc" -ne 0 ] && ! jq -e . /tmp/assembly.json >/dev/null 2>&1; then
+            exit $rc
+          fi
           # Bare assignments, not `echo "x=$(jq ...)"` -- `echo`'s own exit
           # status is what `set -e` inspects, and `echo` always succeeds even
           # when the jq inside its command substitution fails. A simple
@@ -107,6 +125,7 @@ jobs:
           dropped=$(jq -c '[.dropped[].name]' /tmp/assembly.json)
           version=$(jq -r '.version' /tmp/assembly.json)
           { echo "dropped=$dropped"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
+          exit $rc
 
       - name: Regenerate the front page and record what this build contains
         # dist-manifest.json travels with the build, so the release job can name
@@ -242,16 +261,25 @@ jobs:
           # name list for the title, not the raw JSON output value.
           NAMES=$(jq -r '.dropped[].name' /tmp/assembly.json | paste -sd, -)
           TITLE="sync: dropped ${NAMES} -- would not merge"
-          gh issue list --state open --search "$TITLE in:title" --json number \
-            --jq '.[0].number // empty' | grep -q . && exit 0
           DETAIL=$(jq -r '.dropped[] | "- **\(.name)** conflicts in: \(.files | join(", "))"' \
                      /tmp/assembly.json)
           SHA=$(git rev-parse --short master); FULL=$(git rev-parse master)
-          gh issue create \
-            --title "$TITLE" \
-            --body "$(printf '%s\n\n%s\n\nUpstream was at [`%s`](https://github.com/lh3/minibwa/commit/%s) when this ran.\n' \
-              'These optional features would not merge and rerere had no recorded resolution. They are excluded from the current build and will return once resolved.' \
-              "$DETAIL" "$SHA" "$FULL")"
+          BODY=$(printf '%s\n\n%s\n\nUpstream was at [`%s`](https://github.com/lh3/minibwa/commit/%s) when this ran.\n' \
+            'These optional features would not merge and rerere had no recorded resolution. They are excluded from the current build and will return once resolved.' \
+            "$DETAIL" "$SHA" "$FULL")
+          # The title is stable by design (one issue, not one per night), but the
+          # search that finds it is a token match, so ANY open drop issue swallows
+          # the next drop -- including one naming a different feature set. Refresh
+          # the open issue instead of skipping, the way distro-reconcile.yml does,
+          # and refresh the TITLE too: it names the set, so a stale one misreports
+          # which features are actually missing from the build.
+          NUM=$(gh issue list --state open --search "sync: dropped in:title" --json number \
+                  --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --title "$TITLE" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
 
       - name: File an issue on failure
         if: failure()

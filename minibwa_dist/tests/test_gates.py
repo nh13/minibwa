@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from minibwa_dist.gates import GateResult, run_gates, sam_digest
+from minibwa_dist.gates import GateResult, run_feature_suites, run_gates, sam_digest
 from minibwa_dist.manifest import Feature, Manifest, Upstream
 from minibwa_dist.tests.conftest import stub_aligner
 
@@ -264,3 +264,121 @@ def test_binary_failure_is_a_gate_failure_not_a_traceback(tmp_path: Path) -> Non
         tmp_path,
     )
     assert any(not r.passed and "could not run" in r.detail for r in results)
+
+
+# --- feature test suites: the positive-path coverage byte-identity cannot give ---
+
+
+def _suite(directory: Path, name: str, *, exit_code: int, message: str = "") -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(f"#!/bin/sh\necho '{message}'\nexit {exit_code}\n")
+    path.chmod(0o755)
+    return path
+
+
+def _with_tests(name: str, tests: str | None) -> Feature:
+    return Feature(
+        name=name,
+        branch=f"feat/{name}",
+        required=False,
+        output="identical",
+        summary=name,
+        upstream=Upstream(status="unsubmitted"),
+        tests=tests,
+    )
+
+
+def test_a_merged_features_suites_run_and_pass(tmp_path: Path) -> None:
+    _suite(tmp_path / "test/x", "test-a.sh", exit_code=0)
+    _suite(tmp_path / "test/x", "test-b.sh", exit_code=0)
+    manifest = Manifest(features=(_with_tests("x", "test/x"),), withdrawn=())
+
+    results = run_feature_suites(tmp_path, manifest, ("x",))
+
+    assert [r.name for r in results] == ["tests:x"]
+    assert results[0].passed
+    assert "2" in results[0].detail
+
+
+def test_a_failing_suite_fails_the_gate_and_is_named(tmp_path: Path) -> None:
+    _suite(tmp_path / "test/x", "test-ok.sh", exit_code=0)
+    _suite(tmp_path / "test/x", "test-bad.sh", exit_code=1, message="boom")
+    manifest = Manifest(features=(_with_tests("x", "test/x"),), withdrawn=())
+
+    results = run_feature_suites(tmp_path, manifest, ("x",))
+
+    assert not results[0].passed
+    assert "test-bad.sh" in results[0].detail
+    assert "test-ok.sh" not in results[0].detail, "only the failures are worth naming"
+    assert "boom" in results[0].detail, "the failure's output is what makes CI diagnosable"
+
+
+def test_a_dropped_features_suites_are_not_run(tmp_path: Path) -> None:
+    """Its scripts are not even in the tree, and crediting them would overstate
+    coverage the same way the byte-identity gate refuses to."""
+    manifest = Manifest(features=(_with_tests("x", "test/x"),), withdrawn=())
+
+    results = run_feature_suites(tmp_path, manifest, ())
+
+    assert results == []
+
+
+def test_a_feature_without_a_suite_directory_produces_no_gate(tmp_path: Path) -> None:
+    manifest = Manifest(features=(_with_tests("x", None),), withdrawn=())
+
+    assert run_feature_suites(tmp_path, manifest, ("x",)) == []
+
+
+def test_a_merged_feature_whose_suite_directory_is_missing_fails(tmp_path: Path) -> None:
+    """The feature merged, so its scripts should be in the tree. A missing
+    directory is a wrong manifest path, not an absence of coverage -- and
+    passing silently is exactly how a gate stops meaning anything."""
+    manifest = Manifest(features=(_with_tests("x", "test/nope"),), withdrawn=())
+
+    results = run_feature_suites(tmp_path, manifest, ("x",))
+
+    assert not results[0].passed
+    assert "test/nope" in results[0].detail
+
+
+def test_an_empty_suite_directory_fails(tmp_path: Path) -> None:
+    """Zero scripts would otherwise report as a pass over nothing."""
+    (tmp_path / "test/x").mkdir(parents=True)
+    manifest = Manifest(features=(_with_tests("x", "test/x"),), withdrawn=())
+
+    results = run_feature_suites(tmp_path, manifest, ("x",))
+
+    assert not results[0].passed
+    assert "no test-*.sh" in results[0].detail
+
+
+def test_suites_run_with_the_repo_as_the_working_directory(tmp_path: Path) -> None:
+    """The suites locate the binary relative to the tree they ship in."""
+    d = tmp_path / "test/x"
+    d.mkdir(parents=True)
+    script = d / "test-cwd.sh"
+    script.write_text('#!/bin/sh\ntest "$(pwd)" = "$1" || exit 1\n')
+    script.chmod(0o755)
+    # The runner passes the repo root as $1, matching test/altlg/'s own convention.
+    manifest = Manifest(features=(_with_tests("x", "test/x"),), withdrawn=())
+
+    assert run_feature_suites(tmp_path, manifest, ("x",))[0].passed
+
+
+def test_run_gates_includes_the_feature_suites(tmp_path: Path) -> None:
+    """Wired into run_gates, not left as a function nothing calls."""
+    _suite(tmp_path / "test/x", "test-a.sh", exit_code=0)
+    manifest = Manifest(features=(_with_tests("x", "test/x"),), withdrawn=())
+    stock = stub_aligner(tmp_path / "stock", "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n")
+    cand = stub_aligner(tmp_path / "cand", "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n")
+    fixtures = tmp_path / "fx"
+    fixtures.mkdir()
+    for f in ("chrM-human.fa.gz", "chrM-read_1.fa.gz", "chrM-read_2.fa.gz"):
+        (fixtures / f).write_bytes(b"")
+
+    results = run_gates(
+        cand, stock, fixtures, manifest, tmp_path / "wd", merged=("x",), repo=tmp_path
+    )
+
+    assert any(r.name == "tests:x" for r in results)

@@ -107,6 +107,18 @@ def _gates(args: argparse.Namespace) -> int:
     A subcommand rather than two hand-copied heredocs in two workflows: the
     aggregation (`all(...)`) is the whole point of the step, and neither copy
     was reachable by `ruff check minibwa_dist/` or `pytest minibwa_dist/tests`.
+
+    `--repo` is where each merged feature's declared test suites are run. It has
+    no default -- it is not always the working directory, and guessing wrong
+    points the suites at a tree that does not carry them -- but it is optional
+    rather than required, and its absence is reported instead of raising.
+
+    That last part is not politeness. The engine and the workflow file update on
+    different schedules: every sync checks out the freshly assembled `dist-next`
+    and runs THAT `minibwa_dist`, while the YAML executing comes from `dist` and
+    changes only when a build is shipped. A newly required argument would be
+    demanded by the engine a full sync before the workflow could supply it, and
+    the gates step would die on argparse before the ship that would fix it.
     """
     manifest = load_manifest(Path(args.manifest))
     merged: tuple[str, ...] | None = None
@@ -119,9 +131,16 @@ def _gates(args: argparse.Namespace) -> int:
         manifest,
         Path(args.workdir),
         merged=merged,
+        repo=Path(args.repo) if args.repo else None,
     )
     for result in results:
         print(f"{'PASS' if result.passed else 'FAIL'}  {result.name}: {result.detail}")
+    unrun = [f.name for f in manifest.features if f.tests and (merged is None or f.name in merged)]
+    if args.repo is None and unrun:
+        # Not a gate result: it did not run, so it neither passed nor failed.
+        # Said out loud all the same -- unrun coverage that looks like absent
+        # coverage is how a gate quietly stops meaning anything.
+        print(f"NOTE  feature suites not run (--repo not given): {', '.join(unrun)}")
     return 0 if all(result.passed for result in results) else 1
 
 
@@ -240,6 +259,16 @@ def main(argv: list[str] | None = None) -> int:
         "--assembly",
         default=None,
         help="assembly JSON, so coverage names only the features this binary contains",
+    )
+    # No default: the two gate jobs lay their workspaces out differently -- one
+    # runs from the assembled checkout, the other from the tooling checkout with
+    # the candidate in a worktree -- so any default is wrong for one of them. A
+    # "." default aimed the arm64 gate at the tooling checkout, which carries no
+    # suites. Optional rather than required, though: see _gates().
+    p.add_argument(
+        "--repo",
+        default=None,
+        help="the assembled checkout; each merged feature's declared test suites are run in it",
     )
     p.set_defaults(func=_gates)
 

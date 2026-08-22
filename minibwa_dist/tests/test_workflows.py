@@ -600,6 +600,68 @@ def test_a_hard_assembly_failure_exits_before_the_jq_parsing() -> None:
     is different: it DOES emit valid JSON, so it must still reach the outputs.
     """
     text = _executable(_run(_sync(), "assemble", "Assemble dist-next"))
-    guard = 'jq -e . /tmp/assembly.json'
+    guard = "jq -e . /tmp/assembly.json"
     assert guard in text, "a nonzero run with no parsable JSON must exit before jq"
     assert text.index(guard) < text.index("dropped=$(jq")
+
+
+def test_the_gates_step_builds_the_api_probes_it_depends_on() -> None:
+    """Feature suites shell out to the api-test probes, so the gates step must
+    build them rather than inherit them from an earlier step's side effect.
+    Without this the gate fails with "probe not built" -- a build error dressed
+    up as a test failure -- if the steps are ever reordered or split.
+    """
+    text = _executable(_run(_sync(), "assemble", "Output gates"))
+    assert "make -C api-test" in text or "-C api-test" in text
+
+
+def test_both_gate_jobs_point_repo_at_the_assembled_tree() -> None:
+    """`--repo` selects where the feature suites are run, and the two jobs lay
+    their workspaces out differently: the x86 job runs from the assembled
+    checkout, while the arm64 job checks out `ops/distro` and builds the
+    candidate in a worktree. A default would silently aim the arm64 gate at the
+    tooling checkout, which carries no suites at all.
+    """
+    x86 = _executable(_run(_sync(), "assemble", "Output gates"))
+    assert "--repo ." in x86
+
+    arm = _executable(_run(_sync(), "gate-arm64", "Re-gate the published assembly on arm64"))
+    assert "--repo /tmp/cand" in arm, "the arm64 gate must run the suites in the candidate tree"
+    assert "/tmp/cand/api-test" in arm, "and must build the probes those suites shell out to"
+
+
+def test_the_drop_issue_edit_targets_an_exactly_shaped_title() -> None:
+    """`gh issue edit` rewrites title AND body, so the target cannot be chosen by
+    a token search alone -- `sync: dropped in:title` matches on two ordinary
+    words, and `.[0]` would hand the bot whatever came back first. The previous
+    code was safe only because a false hit merely skipped the update.
+    """
+    text = _executable(_run(_sync(), "assemble", "File an issue for dropped features"))
+    assert 'startswith("sync: dropped ")' in text
+    assert 'endswith(" -- would not merge")' in text
+
+
+def test_the_drop_issue_step_runs_even_when_the_assembly_failed() -> None:
+    """A regression exits the assemble step nonzero, and the implicit `success()`
+    would skip the one issue that names which features dropped. That step writes
+    its outputs before exiting precisely so this one can still consume them.
+    """
+    step = yaml_lite.step(_sync(), "assemble", name="File an issue for dropped features")
+    condition = str(step.get("if"))
+    assert condition.startswith("always()"), f"expected always() guard, got {condition!r}"
+    assert "dropped != '[]'" in condition, "still only when something actually dropped"
+
+
+def test_the_suite_timeout_fits_inside_the_job_timeout() -> None:
+    """A per-suite budget the whole set can outlast is a guard that never fires:
+    the runner kills the job first and prints nothing.
+    """
+    from minibwa_dist.gates import _SUITE_TIMEOUT_S
+
+    jobs = _sync()["jobs"]
+    caps = [int(job["timeout-minutes"]) for job in jobs.values() if "timeout-minutes" in job]
+    assert caps, "the gate jobs must declare timeout-minutes for this bound to mean anything"
+    # 15 in-tree ALT suites today; leave room for a set that grows.
+    assert _SUITE_TIMEOUT_S * 20 <= min(caps) * 60, (
+        f"{_SUITE_TIMEOUT_S}s x 20 suites exceeds the {min(caps)}min job cap"
+    )

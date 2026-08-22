@@ -42,6 +42,11 @@ class Feature:
     upstream: Upstream
     condition: str | None = None
     negative: str | None = None
+    # Directory of `test-*.sh` suites this feature ships, run by the output gates
+    # when -- and only when -- the feature is in the build. This is the positive-
+    # path coverage the byte-identity gate deliberately does not provide: those
+    # paths change output on purpose, so identity says nothing about them.
+    tests: str | None = None
     # False for work that is ours to carry and never upstream's to take -- the
     # distribution's own tooling. Defaults true: a feature is a candidate for
     # upstreaming unless the manifest says otherwise.
@@ -125,6 +130,7 @@ def _parse_feature(table: dict[str, object], index: int) -> Feature:
 
     condition = table.get("condition")
     negative = table.get("negative")
+    tests = table.get("tests")
     if output == "conditional" and not (condition and negative):
         # Documentation, and required as such: the gate runs one default-flags
         # comparison that stands in for every conditional feature's negative
@@ -146,6 +152,7 @@ def _parse_feature(table: dict[str, object], index: int) -> Feature:
         upstream=Upstream(status=status, pr=int(pr_raw) if pr_raw is not None else None),
         condition=str(condition) if condition else None,
         negative=str(negative) if negative else None,
+        tests=str(tests) if tests else None,
         upstreamable=_optional_bool(table, "upstreamable", where, default=True),
     )
 

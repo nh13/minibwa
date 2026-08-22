@@ -157,6 +157,10 @@ required = false
 output = "conditional"
 condition = "the index has ALT contigs"
 negative = "align the chrM fixture (no ALT contigs); SAM must be byte-identical to stock"
+# The negative case above is all byte-identity can prove: with no ALT contigs the
+# feature is inert. Its ~1,350 active lines only run when a .alt is present, and
+# these suites are the only thing that exercises them.
+tests = "test/altlg"
 summary = "ALT-aware mapping via post-extension liftover groups"
 upstream = { status = "unsubmitted" }
 

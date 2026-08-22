@@ -158,14 +158,23 @@ jobs:
         # `--assembly` scopes the reported coverage to what actually merged: an
         # optional feature that conflicted is not in this binary, and a gate that
         # names it as covered contradicts the drop list this same job publishes.
+        # `--repo .` is the assembled checkout: each merged feature's declared
+        # `tests` directory is run there, which is the only positive-path coverage
+        # the distribution has -- byte-identity is blind to any path a feature
+        # turns ON, because those change output on purpose.
         run: |
           make -j"$(nproc)"
+          # The feature suites shell out to these probes. Built here rather than
+          # inherited from the earlier build step: a gate that depends on another
+          # step's side effect reports "probe not built" -- a build error wearing a
+          # test failure's clothes -- the first time the steps are reordered.
+          make -j"$(nproc)" -C api-test
           git worktree add /tmp/stock master
           make -C /tmp/stock -j"$(nproc)"
           python -m minibwa_dist.cli gates \
             --candidate ./minibwa --stock /tmp/stock/minibwa \
             --fixtures ./test --workdir /tmp/gates \
-            --assembly /tmp/assembly.json
+            --assembly /tmp/assembly.json --repo .
 
       - name: Re-parent dist-next onto dist
         # dist and dist-next are otherwise INDEPENDENT assemblies of the same
@@ -249,7 +258,13 @@ jobs:
           fi
 
       - name: File an issue for dropped features
-        if: steps.assemble.outputs.dropped != '[]' && steps.assemble.outputs.dropped != ''
+        # `always()`, because a REGRESSION fails the assemble step and would
+        # otherwise skip the one issue naming which features dropped and what they
+        # conflict in. That step writes its outputs before exiting precisely so
+        # this can still run. A regression therefore files this issue AND the
+        # generic `sync: run failed` one: different titles, different information,
+        # neither dedups against the other.
+        if: always() && steps.assemble.outputs.dropped != '[]' && steps.assemble.outputs.dropped != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -273,8 +288,13 @@ jobs:
           # the open issue instead of skipping, the way distro-reconcile.yml does,
           # and refresh the TITLE too: it names the set, so a stale one misreports
           # which features are actually missing from the build.
-          NUM=$(gh issue list --state open --search "sync: dropped in:title" --json number \
-                  --jq '.[0].number // empty')
+          # Token-matched search, then an exact client-side shape check: `gh issue
+          # edit` rewrites title AND body, so a loose match would clobber an
+          # unrelated issue that merely shares two common words. The previous form
+          # was immune only because a false hit just skipped the update.
+          NUM=$(gh issue list --state open --search "sync: dropped in:title" --json number,title \
+                  --jq '[.[] | select((.title | startswith("sync: dropped ")) and
+                                      (.title | endswith(" -- would not merge")))][0].number // empty')
           if [ -n "$NUM" ]; then
             gh issue edit "$NUM" --title "$TITLE" --body "$BODY"
           else
@@ -347,6 +367,8 @@ jobs:
           fi
           git worktree add /tmp/stock "$BASE"
           make -C /tmp/cand  -j"$(nproc)"
+          # The feature suites shell out to these; see the x86 gate step.
+          make -C /tmp/cand/api-test -j"$(nproc)"
           make -C /tmp/stock -j"$(nproc)"
           # dist-manifest.json carries this build's `merged` list, so coverage names
           # only the features actually in the binary -- same scoping the x86 gate
@@ -354,4 +376,4 @@ jobs:
           python -m minibwa_dist.cli gates \
             --candidate /tmp/cand/minibwa --stock /tmp/stock/minibwa \
             --fixtures /tmp/cand/test --workdir /tmp/gates \
-            --assembly /tmp/cand/dist-manifest.json
+            --assembly /tmp/cand/dist-manifest.json --repo /tmp/cand

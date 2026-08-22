@@ -54,7 +54,13 @@ B3_LDLIBS  =
 ifeq ($(B2),1)
 	override CPPFLAGS += -DMB_HAVE_B2
 	CXX ?= c++
-	BWAMEM3_DIR ?= /Users/nhomer/work/git/bwa-mem3/main
+	BWAMEM3_DIR ?= ../bwa-mem3/main
+# Fail fast with a clear message rather than an obscure -I / missing-libbwa.a
+# error deep in the build. Only evaluated under B2=1, so a stock `make` is
+# unaffected. Flush-left: a leading tab would make `$(error)` a recipe line.
+ifeq (,$(wildcard $(BWAMEM3_DIR)/libbwa.a))
+$(error B2=1 needs a pre-built bwa-mem3: no libbwa.a under BWAMEM3_DIR ($(BWAMEM3_DIR)); set BWAMEM3_DIR to a checkout containing libbwa.a)
+endif
 	# Phase-2 reference reconstruction: l2bit.c's l2b_from_bns (built via the
 	# generic .c.o rule, not the b2idx.o-specific one below) needs bwa-mem3's
 	# bntseq.h directly under MB_HAVE_B2, so extend INCLUDES for every .c
@@ -99,6 +105,11 @@ ifeq ($(B2),1)
 	            $(B3_ZLIBNG) $(B3_OMP) $(B3_FRAMEWORKS) $(B3_EXTRA)
 	B2OBJS = b2idx.o
 	LINK       = $(CXX)
+	# Intentionally empty (native builds use LINK_FLAGS = $(CFLAGS)): under B2=1
+	# the CFLAGS bits that matter at link are carried elsewhere -- any -fsanitize
+	# rides in via $(LDFLAGS), and OpenMP/arch libs via $(B3_LDLIBS)/$(B3_OMP) --
+	# so folding $(CFLAGS) in here would only re-add compile-only flags (and could
+	# duplicate -fopenmp against the C++ linker). See the link recipe below.
 	LINK_FLAGS =
 	# bwa-mem3's libbwa.a pulls in its own libsais (needs the gsa_omp variant
 	# above); linking minibwa's libsais.o/libsais64.o too would duplicate
@@ -136,7 +147,7 @@ $(LOBJS) $(AOBJS) main.o: .build-mode
 
 all:$(PROG)
 
-b2idx.o:b2idx.cpp b2idx.h bwt.h
+b2idx.o:b2idx.cpp b2idx.h bwt.h kalloc.h $(BWAMEM3_DIR)/src/fmi_seed_api.h $(BWAMEM3_DIR)/src/bntseq.h
 		$(CXX) -c -std=c++14 -O3 -g -Wall $(B3_ARCH_FLAGS) -I$(BWAMEM3_DIR)/src -I. $< -o $@
 
 mimalloc.o:
@@ -146,7 +157,10 @@ libminibwa.a:$(LOBJS)
 		$(AR) -csru $@ $(LOBJS)
 
 minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o
-		$(LINK) $(LINK_FLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o -o $@ -L. -lminibwa $(LIBS) $(B3_LDLIBS)
+		# $(LIBS) (-lz ...) MUST follow $(B3_LDLIBS): static libhts.a in there needs zlib
+		# resolved after it, or the B2 link fails on undefined zlib symbols. Native builds
+		# have an empty $(B3_LDLIBS), so this is just $(LIBS) at the end as before.
+		$(LINK) $(LINK_FLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o -o $@ -L. -lminibwa $(B3_LDLIBS) $(LIBS)
 
 clean:
 		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM .build-mode

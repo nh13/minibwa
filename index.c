@@ -273,11 +273,14 @@ static int usage_index(FILE *fp, uint64_t seed, int sa_bit, int n_thread)
 
 // parse a comma-separated list of integers in [0,32) (e.g. "3,4,2") into sa_bits[],
 // capped at max_n values; empty tokens are skipped. Returns the number of values parsed,
-// or -1 on a malformed (non-numeric) or out-of-range token.
-static int parse_sa_bits(const char *arg, int *sa_bits, int max_n)
+// or -1 on a malformed (non-numeric) or out-of-range token. If `truncated` is non-NULL,
+// it is set to 1 when the list held more than max_n values (the extras were dropped),
+// else 0.
+static int parse_sa_bits(const char *arg, int *sa_bits, int max_n, int *truncated)
 {
 	const char *p = arg;
 	int n = 0;
+	if (truncated) *truncated = 0;
 	while (*p && n < max_n) {
 		char *end;
 		long v;
@@ -290,12 +293,33 @@ static int parse_sa_bits(const char *arg, int *sa_bits, int max_n)
 		if (*p == ',') ++p;
 		else if (*p != '\0') return -1; // junk after the number
 	}
+	if (truncated && n == max_n) {
+		while (*p == ',') ++p; // skip trailing/empty separators before checking for real leftovers
+		if (*p != '\0') *truncated = 1;
+	}
 	return n;
 }
 
 static int cmp_int(const void *a, const void *b)
 {
 	return *(const int*)a - *(const int*)b;
+}
+
+// peek the SA density bundled into an existing .mbw (the 4-byte sa_bit field
+// right after the magic, offset 4) without fully loading it. Needed because
+// mb_bwt_load_nosa() deliberately resets bwt->sa_bit to the "no SA attached"
+// sentinel (-1) after reading it, so the bundled density can't be recovered
+// from the returned bwt. Returns 0 on success (with *out set), -1 on any
+// I/O error or magic mismatch.
+static int peek_bundled_sa_bit(const char *fn, uint32_t *out)
+{
+	FILE *fp = fopen(fn, "rb");
+	char magic[4];
+	if (fp == 0) return -1;
+	if (fread(magic, 1, 4, fp) != 4 || strncmp(magic, MB_MAGIC, 4) != 0) { fclose(fp); return -1; }
+	if (fread(out, 4, 1, fp) != 1) { fclose(fp); return -1; }
+	fclose(fp);
+	return 0;
 }
 
 int main_index(int argc, char *argv[])
@@ -314,11 +338,14 @@ int main_index(int argc, char *argv[])
 		else if (c == 'l') low_mem = 1;
 		else if (c == 'b') block_size = kom_parse_num(o.arg, 0);
 		else if (c == 'u') {
-			n_sa_bits = parse_sa_bits(o.arg, sa_bits, 8);
+			int truncated = 0;
+			n_sa_bits = parse_sa_bits(o.arg, sa_bits, 8, &truncated);
 			if (n_sa_bits <= 0) {
 				fprintf(stderr, "ERROR: -u expects a comma-separated list of non-negative integers (e.g. -u 3,4), got \"%s\"\n", o.arg);
 				return 1;
 			}
+			if (truncated)
+				fprintf(stderr, "WARNING: -u accepts at most 8 SA densities; extra values in \"%s\" were ignored\n", o.arg);
 		}
 		else if (c == 's') seed = atol(o.arg);
 		else if (c == 901) return usage_index(stdout, seed, n_sa_bits? sa_bits[0] : 4, n_thread);
@@ -328,6 +355,10 @@ int main_index(int argc, char *argv[])
 	qsort(sa_bits, n_sa_bits, sizeof(int), cmp_int); // ascending: sa_bits[0] is densest (smallest sa_bit) -> bundled in .mbw
 	if (n_sa_bits > 1 && is_meth) {
 		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with --meth\n");
+		return 1;
+	}
+	if (low_mem && n_sa_bits > 1) {
+		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with -l\n");
 		return 1;
 	}
 	if (argc - o.ind == 0) return usage_index(stderr, seed, sa_bits[0], n_thread);
@@ -368,9 +399,12 @@ int main_index(int argc, char *argv[])
 #endif
 	} else {
 		int reused, i;
+		uint32_t bundled_sa_bit = (uint32_t)-1; // valid only when reused is true
+		char *side;
 		l2b_save(fn_l2b, l2b);
 		// incremental: reuse an existing .mbw if present (BWT not rebuilt), else build from scratch
 		reused = (access(fn_bwt, R_OK) == 0);
+		if (reused) peek_bundled_sa_bit(fn_bwt, &bundled_sa_bit); // best-effort; a failure here just disables the dedup below
 		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
 		if (bwt == NULL) { bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread); reused = 0; }
 		if (!reused) { // fresh build: densest requested density is bundled into the .mbw
@@ -379,12 +413,14 @@ int main_index(int argc, char *argv[])
 		}
 		// on an incremental run the .mbw's bundled density is fixed and left untouched, so every
 		// requested density becomes a sidecar; on a fresh build only sa_bits[1..] do (sa_bits[0] is bundled above)
+		side = kom_calloc(char, strlen(prefix) + 32);
 		for (i = reused? 0 : 1; i < n_sa_bits; ++i) {
-			char side[1024];
-			snprintf(side, sizeof side, "%s.sa.u%d", prefix, sa_bits[i]);
+			if (reused && (uint32_t)sa_bits[i] == bundled_sa_bit) continue; // redundant: already bundled in .mbw
+			sprintf(side, "%s.sa.u%d", prefix, sa_bits[i]);
 			mb_bwt_gen_sa(bwt, sa_bits[i]);
 			mb_bwt_save_sa(side, bwt);
 		}
+		free(side);
 		mb_bwt_destroy(bwt);
 		if (is_meth) {
 			bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 1, n_thread);

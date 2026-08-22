@@ -523,7 +523,8 @@ int main_map(int argc, char *argv[])
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
 		} else if (c == 316) { // --index-regime
-			forced_regime = o.arg;
+			// "auto" is the default automatic selection, not a regime name: keep it NULL
+			forced_regime = strcmp(o.arg, "auto") == 0 ? NULL : o.arg;
 		} else if (c == 317) { // --index-mem
 			index_mem_cap = kom_parse_num(o.arg, 0);
 		} else if (c == 318) { // --list-regimes
@@ -571,8 +572,10 @@ int main_map(int argc, char *argv[])
 	}
 	if (mo.flag & MB_F_NO_ALN) mo.flag |= MB_F_NO_PAIRING | MB_F_PAF;
 	// --list-regimes only needs the index prefix; every other mode also needs >=1 read file
-	if (argc - o.ind < (list_regimes? 1 : 2))
+	if (argc - o.ind < (list_regimes? 1 : 2)) {
+		if (hdr_ins.s) free(hdr_ins.s);
 		return usage_map(stderr, &mo);
+	}
 
 	is_meth = !!(mo.flag & MB_F_METH);
 	{
@@ -601,12 +604,14 @@ int main_map(int argc, char *argv[])
 			if (hdr_ins.s) free(hdr_ins.s);
 			return 1;
 		}
-		kom_assert(pick >= 0, "no index regime fits the memory budget (try --index-mem or build a sparser -u)");
-		/* Warn only if the selected regime actually resides in RAM beyond the
-		 * budget. A bundled regime under --mmap is demand-paged, so it never does. */
-		if (!(use_mmap && rgs[pick].sa_path[0] == '\0') && rgs[pick].est_ram > budget)
-			fprintf(stderr, "[M::regime] warning: selected '%s' (est %.1f GB) exceeds the memory budget (%.1f GB)\n",
-			        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
+		/* mb_regime_pick returns -1 when a real memory budget is set and no regime
+		 * fits it -- a user/config condition, not a bug, so report it cleanly
+		 * rather than aborting through kom_assert. */
+		if (pick < 0) {
+			fprintf(stderr, "[ERROR] no index regime fits the memory budget (try --index-mem, --mmap, or build a sparser -u)\n");
+			if (hdr_ins.s) free(hdr_ins.s);
+			return 1;
+		}
 		if (kom_verbose >= 3)
 			fprintf(stderr, "[M::regime] selected '%s' (est %.1f GB; budget %.1f GB)\n",
 			        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);

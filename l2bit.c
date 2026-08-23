@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <zlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 #include "kommon.h"
 #include "l2bit.h"
@@ -146,6 +147,13 @@ static void l2b_add_seq(l2b_t *l2b, uint64_t len, const char *seq, const char *n
 	ctg->comm = comm? kom_strdup(comm) : 0;
 	ctg->len = len;
 	ctg->off = l2b->tot_len;
+	/* kom_grow() uses realloc(), which does NOT zero new slots, so the ALT fields
+	 * must be initialized explicitly here.  Without this, l2b_destroy() frees an
+	 * uninitialized ctg->lift on the plain `minibwa index` path (l2b_set_alt is
+	 * never called there), which crashes on any multi-contig reference. */
+	ctg->is_alt = 0;
+	ctg->n_lift = 0;
+	ctg->lift = 0;
 	l2b->tot_len += len;
 
 	m_pac_old = l2b->m_pac;
@@ -250,6 +258,25 @@ void l2b_destroy(l2b_t *l2b)
  * ALT liftover index       *
  ****************************/
 
+/* Order lift blocks by ALT-forward start (then end) so l2b_lift()'s binary
+ * search over [alt_st, alt_en) is valid.  Blocks are appended in file order,
+ * which is non-monotonic for reverse records (emitted descending after the
+ * RC->forward remap) and for ALT contigs carrying multiple .alt records. */
+static int l2b_lift_cmp(const void *a, const void *b)
+{
+	const l2b_lift_t *x = (const l2b_lift_t*)a, *y = (const l2b_lift_t*)b;
+	if (x->alt_st != y->alt_st) return x->alt_st < y->alt_st? -1 : 1;
+	if (x->alt_en != y->alt_en) return x->alt_en < y->alt_en? -1 : 1;
+	/* qsort is not stable, so equal keys would reorder arbitrarily between libc
+	 * implementations and make the lift -- and therefore the SAM -- differ across
+	 * platforms. Two records CAN tie on the ALT span and differ in target, which
+	 * multi-record ALT contigs make reachable. Break every tie. */
+	if (x->pri_tid != y->pri_tid) return x->pri_tid < y->pri_tid? -1 : 1;
+	if (x->pri_st != y->pri_st) return x->pri_st < y->pri_st? -1 : 1;
+	if (x->rev != y->rev) return x->rev < y->rev? -1 : 1;
+	return 0;
+}
+
 int l2b_set_alt(l2b_t *l2b, const char *fn)
 {
 	FILE *fp;
@@ -260,7 +287,6 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 	uint64_t i;
 
 	/* Reset: free any existing lift blocks and clear flags. */
-	l2b->n_alt = 0;
 	for (i = 0; i < l2b->n_ctg; ++i) {
 		free(l2b->ctg[i].lift);
 		l2b->ctg[i].lift = 0;
@@ -277,10 +303,12 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 		char *fields[12];
 		int nf;
 		int64_t alt_tid, pri_tid;
+		long pos1;
 		uint64_t pri_pos, alt_cursor, pri_cursor;
 		uint32_t flag;
 		uint8_t rev;
-		uint32_t m_lift;
+		uint32_t m_lift, n_lift0;
+		int bad;
 		l2b_ctg_t *ctg;
 
 		/* Skip SAM header lines. */
@@ -329,26 +357,41 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 		flag = (uint32_t)atol(fields[1]);
 		rev  = (flag & 0x10) ? 1 : 0;
 
-		/* POS is 1-based; convert to 0-based. */
-		pri_pos = (uint64_t)(atol(fields[3]) - 1);
+		/* POS is 1-based; a valid mapped record has POS >= 1.  A malformed POS=0
+		 * (or negative) would underflow to a garbage primary coordinate, so skip. */
+		pos1 = atol(fields[3]);
+		if (pos1 < 1) {
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::%s] QNAME '%s' has invalid POS '%s', skipping\n", __func__, fields[0], fields[3]);
+			continue;
+		}
+		pri_pos = (uint64_t)(pos1 - 1);
 
 		ctg = &l2b->ctg[alt_tid];
-		/* n_alt counts records (a contig may carry several); n_alt_ctg counts contigs,
-		 * so only the first record for a contig advances it. */
+		/* n_alt_ctg counts contigs (a contig may carry several records via
+		 * supplementary lines), so only the first record for a contig advances it. */
 		if (!ctg->is_alt) ++l2b->n_alt_ctg;
 		ctg->is_alt = 1;
 		++n_alt;
 
-		/* Walk CIGAR to build lift blocks. */
+		/* Walk CIGAR to build lift blocks.  alt_cursor tracks the position along
+		 * the CIGAR's query axis: for a forward record this IS the ALT-forward
+		 * coordinate; for a reverse record it is the reverse-complement coordinate,
+		 * so each M block is remapped to ALT-forward below.  A final sort over all
+		 * of the contig's blocks restores the alt_st ordering l2b_lift() needs. */
 		alt_cursor = 0;
 		pri_cursor = pri_pos;
 		m_lift = ctg->n_lift;
+		n_lift0 = ctg->n_lift; /* rollback point if the CIGAR is malformed */
+		bad = 0;
 
 		p = fields[5];
 		while (*p) {
 			uint64_t len = 0;
 			int op;
+			if (*p < '0' || *p > '9') { bad = 1; break; } /* expected an op length */
 			while (*p >= '0' && *p <= '9') len = len * 10 + (*p++ - '0');
+			if (*p == '\0') { bad = 1; break; } /* length with no operator (ran off the field) */
 			op = *p++;
 			if (op == 'M' || op == '=' || op == 'X') {
 				/* Emit one lift block. */
@@ -360,33 +403,75 @@ int l2b_set_alt(l2b_t *l2b, const char *fn)
 				blk.pri_en  = pri_cursor + len;
 				blk.rev     = rev;
 
-				if (ctg->n_lift >= m_lift) {
-					m_lift = ctg->n_lift + 1;
-					m_lift += m_lift >> 1;
-					ctg->lift = (l2b_lift_t*)realloc(ctg->lift, m_lift * sizeof(l2b_lift_t));
+				/* Reverse record: the CIGAR walks the reverse-complement of the ALT
+				 * contig, so [alt_st, alt_en) is in RC coordinates.  Remap to
+				 * ALT-forward ([len_alt-alt_en, len_alt-alt_st)) while leaving
+				 * pri_st/pri_en unchanged; l2b_lift()'s reverse branch then maps the
+				 * forward query position back with its decreasing correspondence. */
+				if (rev) {
+					/* The remap subtracts from ctg->len, so a record whose query span
+					 * runs past the contig it names would wrap to ~UINT64_MAX and sort
+					 * to the end of lift[], where the binary search reads it as a valid
+					 * block -- silently wrong lifts, no crash. Reject the record. */
+					if (blk.alt_en > ctg->len) { bad = 1; break; }
+					uint64_t fst = ctg->len - blk.alt_en;
+					uint64_t fen = ctg->len - blk.alt_st;
+					blk.alt_st = fst;
+					blk.alt_en = fen;
 				}
+
+				kom_grow(l2b_lift_t, ctg->lift, ctg->n_lift, m_lift);
 				ctg->lift[ctg->n_lift++] = blk;
 
 				alt_cursor += len;
 				pri_cursor += len;
-			} else if (op == 'I' || op == 'S') {
-				/* ALT-only insertion: advance only alt_cursor (hole in primary map). */
+			} else if (op == 'I' || op == 'S' || op == 'H') {
+				/* Query/ALT-consuming ops with no primary footprint.  A hard clip
+				 * removes bases from SEQ but they still occupy the ALT contig, so
+				 * (like S and I) it advances the ALT axis -- essential for a
+				 * supplementary .alt record whose leading H is its offset into the
+				 * ALT contig. */
 				alt_cursor += len;
 			} else if (op == 'D' || op == 'N') {
 				/* Deletion from ALT: advance only pri_cursor. */
 				pri_cursor += len;
+			} else if (op == 'P') {
+				/* Padding: consumes neither coordinate. */
+			} else {
+				bad = 1; break; /* unknown CIGAR operator */
 			}
-			/* H (hard clip) and P (padding) consume nothing in either coordinate. */
+		}
+		if (bad) {
+			/* Roll back this record's partial blocks. The buffer keeps whatever
+			 * capacity the partial append grew it to; shrink so the next record's
+			 * `m_lift = ctg->n_lift` still describes the real allocation, as it does
+			 * on every non-rollback path. */
+			ctg->n_lift = n_lift0;
+			if (ctg->n_lift > 0 && ctg->n_lift < m_lift)
+				ctg->lift = kom_realloc(l2b_lift_t, ctg->lift, ctg->n_lift);
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::%s] QNAME '%s' has an unparsable CIGAR '%s', skipping record\n", __func__, fields[0], fields[5]);
+			continue;
 		}
 
 		/* Shrink the lift array to exact size. */
 		if (ctg->n_lift > 0 && ctg->n_lift < m_lift)
-			ctg->lift = (l2b_lift_t*)realloc(ctg->lift, ctg->n_lift * sizeof(l2b_lift_t));
+			ctg->lift = kom_realloc(l2b_lift_t, ctg->lift, ctg->n_lift);
 	}
 
 	free(line);
 	fclose(fp);
-	l2b->n_alt = n_alt;
+
+	/* Blocks were appended in file order.  Reverse records and multi-record ALT
+	 * contigs make lift[] non-monotonic in alt_st, but l2b_lift()'s binary search
+	 * requires it sorted.  Sort each ALT contig's blocks now that every record is
+	 * loaded. */
+	for (i = 0; i < l2b->n_ctg; ++i) {
+		l2b_ctg_t *c = &l2b->ctg[i];
+		if (c->n_lift > 1)
+			qsort(c->lift, c->n_lift, sizeof(l2b_lift_t), l2b_lift_cmp);
+	}
+
 	return n_alt;
 }
 

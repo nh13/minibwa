@@ -38,7 +38,6 @@ typedef struct {
 	uint64_t n_pac, m_pac;
 	uint64_t n_ambi, m_ambi;
 	uint64_t n_mask, m_mask;
-	uint64_t n_alt;  // number of ALT lift records loaded from a .alt (0 => no ALT awareness)
 	l2b_intv_t *ambi, *mask;
 	uint64_t *pac;
 	char *cat_name, *cat_comm;

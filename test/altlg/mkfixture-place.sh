@@ -21,6 +21,7 @@
 #              taken from the first liftable base.
 #   twin-indel chrP read with a tiny (<=tol) deletion vs chrP_alt: still groups.
 set -eu
+. "$(dirname "$0")/fixlib.sh"
 d="$1"; mkdir -p "$d"
 
 S=$(printf '%s' 'GATCCTAGCATGCTAGGCTAACGTTAGCCGATCGTAGCTAGGCATCGATCGTAGCTAGCTAGGCATCGATTACGATCGGCTAATCGATCGTAGCTGATCGA'\
@@ -31,7 +32,6 @@ S=$(printf '%s' 'GATCCTAGCATGCTAGGCTAACGTTAGCCGATCGTAGCTAGGCATCGATCGTAGCTAGCTAGG
 L=${#S}
 
 # revcomp helper (reads stdin, writes revcomp to stdout)
-rc() { rev | tr 'ACGTacgt' 'TGCAtgca'; }
 
 # --- contigs ---
 printf '>chrP\n%s\n' "$S" > "$d/ref.fa"

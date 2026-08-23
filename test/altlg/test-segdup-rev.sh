@@ -24,6 +24,7 @@
 #
 # Usage: test/altlg/test-segdup-rev.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -35,8 +36,6 @@ N=20
 TMPD=$(mktemp -d /tmp/altlg-segdup-rev.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # proj_line <stderr-trace> <strand>  -> the MB_PROJ POS for chrP on that strand,
 # for the FULL-read seed (len=150); empty if none.

@@ -37,18 +37,9 @@
 #
 # Usage: mkfixture-svbreak.sh <out-dir>
 set -eu
+. "$(dirname "$0")/fixlib.sh"
 d="$1"; mkdir -p "$d"
 
-gen() { python3 -c "
-import random
-random.seed($1)
-print(''.join(random.choice('ACGT') for _ in range($2)))
-"; }
-rc() { python3 -c "
-import sys
-s=sys.argv[1]
-print(s.translate(str.maketrans('ACGT','TGCA'))[::-1])
-" "$1"; }
 
 A=75            # LEFT block length
 B=75            # RIGHT block length

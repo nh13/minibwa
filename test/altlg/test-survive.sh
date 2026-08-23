@@ -11,16 +11,18 @@
 # With the survival guard the twin is force-kept because its lifted placement
 # co-locates with the kept chrP primary (same pri_tid=chrP, same rev, |Δlst|=0).
 #
-# RED assertion (guard absent): chrP_alt NOT in SAM output (-p 0.9 --outn=50).
 # GREEN assertion (guard present): chrP_alt IS in SAM output.
-# Note: the RED state can be verified by temporarily passing NULL for l2b in
-# the two mb_select_sub driver calls in mb_map_sai.
+# RED assertion (guard ablated): with --dbg-no-alt-survive the guard is skipped
+# and chrP_alt must be ABSENT.  Asserting both states proves the fixture actually
+# exercises the guard's drop path (not that chrP_alt survives for some unrelated
+# reason), so the test cannot silently stop stressing the guard.
 #
 # Baseline (chrM, no .alt): guard never fires; output byte-identical without
 # guard because l2b has no ALT contigs (guard gated on l2b ALT presence).
 #
 # Usage: test/altlg/test-survive.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MKFIXTURE="$MDIR/test/altlg/mkfixture-survive.sh"
@@ -32,8 +34,6 @@ MINIBWA="$MDIR/minibwa"
 TMPD=$(mktemp -d /tmp/altlg-survive.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # ---------------------------------------------------------------------------
 # Part 1: survival fixture (unique chrP + chrP_alt with 1bp SNP at read pos 55)
@@ -82,6 +82,23 @@ if [ -n "$pri_pos" ] && [ -n "$alt_pos" ]; then
     fi
     ok "chrP_alt POS=$alt_pos co-locates with chrP POS=$pri_pos (|diff|=$d <= 10)"
 fi
+
+# --- RED state: ablate ONLY the survival guard and confirm chrP_alt is dropped.
+# This proves the fixture geometry genuinely drives the twin below the
+# score-ratio/min-diff thresholds, so the GREEN assertion above is meaningful. ---
+echo "[test-survive] mapping with --dbg-no-alt-survive (guard ablated) ..."
+"$MINIBWA" map -p 0.9 --outn=50 --dbg-no-alt-survive "$TMPD/ref.fa" "$TMPD/reads.fq" 2>/dev/null \
+    > "$TMPD/out.red.sam"
+echo "----- SAM output (guard ablated) -----"
+grep -v "^@" "$TMPD/out.red.sam"
+echo "----- end -----"
+red_pri=$(mawk '$1=="r-survive" && $3=="chrP" && ($2+0==0) {found=1} END{print found+0}' "$TMPD/out.red.sam")
+[ "$red_pri" = "1" ] || fail "(RED) primary chrP alignment should still be present with the guard ablated"
+red_alt=$(mawk '$1=="r-survive" && $3=="chrP_alt" {found=1} END{print found+0}' "$TMPD/out.red.sam")
+if [ "$red_alt" != "0" ]; then
+    fail "(RED) chrP_alt should be DROPPED with the guard ablated, but it survived; the fixture is not exercising the guard's drop path"
+fi
+ok "chrP_alt dropped when guard ablated (RED): fixture provably stresses the survival guard"
 
 # ---------------------------------------------------------------------------
 # Part 2: chrM baseline — guard never fires (no .alt -> l2b has no ALT ctgs)

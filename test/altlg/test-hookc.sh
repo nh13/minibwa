@@ -32,6 +32,7 @@
 #
 # Usage: test/altlg/test-hookc.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -44,15 +45,7 @@ EX_PLACE="$MDIR/api-test/ex-place-check"
 TMPD=$(mktemp -d /tmp/altlg-hookc.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
-has_bit() { mawk -v f="$1" -v b="$2" 'BEGIN{ f=int(f); b=int(b);
-    printf "%d\n", (int(f/b)%2==1)?1:0; }'; }
-flag_of() { mawk -v q="$2" -v c="$3" -v p="${4:-}" \
-    '$1==q && $3==c && (p=="" || $4==p){print $2; exit}' "$1"; }
-mapq_of() { mawk -v q="$2" -v c="$3" -v p="${4:-}" \
-    '$1==q && $3==c && (p=="" || $4==p){print $5; exit}' "$1"; }
 
 # =========================================================================
 echo "[test-hookc] building fixture ..."

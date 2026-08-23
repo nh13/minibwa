@@ -15,6 +15,7 @@
 #
 # Usage: test/altlg/test-segdup.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -26,13 +27,10 @@ N=20        # primary copies of CORE
 TMPD=$(mktemp -d /tmp/altlg-segdup.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # chrP_pos_list <sam>  -> sorted space-separated list of chrP POS values
 chrP_pos_list() { mawk '$1!~/^@/ && $3=="chrP"{print $4}' "$1" | sort -n | tr '\n' ' '; }
 # has_pos <sam> <pos>  -> "1" if any chrP record has that POS, else "0"
-has_pos() { mawk -v p="$2" 'BEGIN{f=0} $1!~/^@/ && $3=="chrP" && $4==p{f=1} END{print f}' "$1"; }
 
 echo "[test-segdup] building segdup fixture (N=$N copies) ..."
 /bin/sh "$MK_SEG" "$TMPD" "$N" 2>/dev/null

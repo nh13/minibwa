@@ -571,15 +571,10 @@ add_primary:
 
 /* Mark the SAM primary among the group representatives (parent==id).
  *
- * `pref` is the PE-pair-chosen endpoint (mb_pair sets it to paux.i[r] when a
- * proper pair was applied; -1 otherwise / on the SE path).  When present and it
- * survived as a representative, it IS the read's primary placement: the pair
- * score (DP + insert-size consistency) disambiguated near-equal paralog copies
- * that this per-read pass cannot (the reps are sorted by DP score then hash, so
- * among equal-scoring subtelomeric/segdup paralogs the first-by-index rep is
- * effectively arbitrary -- and was emitting a different copy than the mate-
- * consistent one the pairing chose).  Otherwise fall back to the 5'-most
- * (is_primary5) or the first representative. */
+ * Selection is per-read: the 5'-most representative (smallest query start) when
+ * is_primary5 is set, otherwise the first representative by index.  The pairing
+ * pass does not disambiguate the primary here -- upstream sets sam_pri on the
+ * pair-chosen endpoint separately (see the paired branch in pe.c). */
 int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 {
 	int32_t i, new_pri, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
@@ -652,7 +647,10 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 		 * intentionally generous: over-keeping is cheap; the authoritative grouping
 		 * happens later.  Never make this tolerance tighter than MB_LIFT_TOL. */
 		if (use_lift) {
-			for (i = 0; i < n; ++i) {
+			/* --dbg-no-alt-survive ablates just this guard (testing), so a fixture
+			 * can assert the RED state (twin dropped) as well as the GREEN one. */
+			int ablate = (kom_dbg_flag & MB_DBG_NO_ALT_SURVIVE) != 0;
+			if (!ablate) for (i = 0; i < n; ++i) {
 				if (!keep[i] && r[i].is_alt) {
 					if (mb_place_matches_any(l2b, &r[i], kept_pl, n_kept, lift_tol))
 						keep[i] = 1;
@@ -748,10 +746,23 @@ void mb_reconcile_alt(void *km, const l2b_t *l2b, int n_hit, mb_hit_t *hit, int 
 	for (i = 0; i < n_hit; ++i)
 		pl[i] = mb_hit_place(l2b, &hit[i]);
 
-	/* 2. group by lifted placement.  n_hit is small (a handful), so an O(n^2)
-	 * transitive close-up is cheaper and clearer than a real union-find: assign
-	 * each hit to the lowest-index hit it co-locates with that already has a
-	 * group.  Unliftable hits never match and stay singletons. */
+	/* 2. group by lifted placement via transitive close-up: for each co-locating
+	 * pair in different groups, unite the groups -- but only after an all-cross-
+	 * pairs guard (the t/u loops below) confirms EVERY member pair co-locates AND
+	 * query-overlaps, which is what stops chimeric segments and paralogs from
+	 * drifting together.  Unliftable hits never match and stay singletons.
+	 *
+	 * Complexity: the guard makes a single merge O(n_hit^2), so the loop is
+	 * O(n_hit^4) in the worst case, NOT O(n_hit^2).  In practice it stays near
+	 * O(n_hit^2): (a) n_hit is small -- default max_occ/out_n subsampling caps the
+	 * surviving hits, and even a 40-copy segdup measured n_hit=41; (b) the
+	 * `grp[j]==grp[i]` short-circuit skips within-group pairs, and hits of one
+	 * read that co-locate also query-overlap, so they merge on first contact and
+	 * collapse to one group instead of re-triggering the guard.  A true union-
+	 * find would drop the exponent but cannot express the all-cross-pairs guard
+	 * (it unites on a single edge), so it would merge groups this must keep apart.
+	 * If a profile ever shows this hot, cap n_hit rather than change the grouping
+	 * semantics. */
 	for (i = 0; i < n_hit; ++i) grp[i] = i;            /* initially own group */
 	for (i = 0; i < n_hit; ++i) {
 		if (!pl[i].liftable) continue;

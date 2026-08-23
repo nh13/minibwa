@@ -20,6 +20,7 @@
 #
 # Usage: test/altlg/test-indel.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -28,8 +29,6 @@ MK="$MDIR/test/altlg/mkfixture-indel.sh"
 TMPD=$(mktemp -d /tmp/altlg-indel.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 echo "[test-indel] building indel fixture (.alt 75M5D75M) ..."
 /bin/sh "$MK" "$TMPD" 2>/dev/null

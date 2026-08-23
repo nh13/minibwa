@@ -85,6 +85,10 @@ minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) main.o
 # minibwa to enable the no-.alt byte-identity comparisons; they are skipped without it.
 test:minibwa
 		$(MAKE) -C api-test
+		@if [ -z "$$MB_STOCK" ]; then \
+			echo "NOTE: MB_STOCK unset -> the no-.alt byte-identity-vs-stock comparisons are SKIPPED."; \
+			echo "      Set MB_STOCK=<path to a stock minibwa> to exercise that invariant."; \
+		fi
 		@fail=0; for t in test/altlg/test-*.sh; do \
 			printf '%s: ' "$$t"; \
 			if sh "$$t" > /tmp/altlg-log.$$$$ 2>&1; then echo PASS; \

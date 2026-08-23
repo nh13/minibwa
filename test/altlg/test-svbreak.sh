@@ -26,6 +26,7 @@
 #
 # Usage: test/altlg/test-svbreak.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -37,18 +38,8 @@ MK_SV="$MDIR/test/altlg/mkfixture-svbreak.sh"
 TMPD=$(mktemp -d /tmp/altlg-svbreak.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # primary_flag/_mapq <sam> <qname> -> the SAM-primary record (no 0x100, no 0x800)
-primary_flag() {
-    mawk -v q="$2" '$1==q { f=int($2);
-        if (int(f/256)%2==0 && int(f/2048)%2==0) { print $2; exit } }' "$1"
-}
-primary_mapq() {
-    mawk -v q="$2" '$1==q { f=int($2);
-        if (int(f/256)%2==0 && int(f/2048)%2==0) { print $5; exit } }' "$1"
-}
 # secondary present on a given contig (0x100 set)?  prints the FLAG of the first.
 alt_secondary_flag() {
     mawk -v q="$2" -v c="$3" '$1==q && $3==c { f=int($2);

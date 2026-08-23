@@ -55,19 +55,10 @@
 #
 # Usage: mkfixture-projrev.sh <out-dir> [N-copies]
 set -eu
+. "$(dirname "$0")/fixlib.sh"
 d="$1"; mkdir -p "$d"
 N="${2:-20}"
 
-gen() { python3 -c "
-import random
-random.seed($1)
-print(''.join(random.choice('ACGT') for _ in range($2)))
-"; }
-rc() { python3 -c "
-import sys
-s=sys.argv[1]
-print(s.translate(str.maketrans('ACGT','TGCA'))[::-1])
-" "$1"; }
 
 # Sequence seeds chosen so the SA-array lexicographic order places the
 # ALT-contig hit BEFORE the primary LIFT hit in the 150bp SMEM's SA interval,

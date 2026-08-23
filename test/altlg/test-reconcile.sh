@@ -33,6 +33,7 @@
 #
 # Usage: test/altlg/test-reconcile.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -48,28 +49,12 @@ MK_CHIM="$MDIR/test/altlg/mkfixture-chimera.sh"
 TMPD=$(mktemp -d /tmp/altlg-reconcile.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # flag_of <sam> <qname> <rname>  -> FLAG of the first matching record
-flag_of() { mawk -v q="$2" -v c="$3" '$1==q && $3==c {print $2; exit}' "$1"; }
-mapq_of() { mawk -v q="$2" -v c="$3" '$1==q && $3==c {print $5; exit}' "$1"; }
 # has_bit <flag> <bit>  -> "1" if (flag & bit) else "0".  <bit> must be a single
 # power-of-two (FLAG bits via integer arithmetic; mawk lacks a portable &).
-has_bit() {
-    mawk -v f="$1" -v b="$2" 'BEGIN{ f=int(f); b=int(b);
-        printf "%d\n", (int(f / b) % 2 == 1) ? 1 : 0; }'
-}
 # primary_flag <sam> <qname>  -> FLAG of the record without 0x100 (secondary)
 # and without 0x800 (supplementary) — i.e. the SAM primary line.
-primary_flag() {
-    mawk -v q="$2" '$1==q { f=int($2);
-        if (int(f/256)%2==0 && int(f/2048)%2==0) { print $2; exit } }' "$1"
-}
-primary_mapq() {
-    mawk -v q="$2" '$1==q { f=int($2);
-        if (int(f/256)%2==0 && int(f/2048)%2==0) { print $5; exit } }' "$1"
-}
 
 # =========================================================================
 echo "[test-reconcile] building reconcile fixture ..."
@@ -109,8 +94,6 @@ fi
 # --- case (c): homologous-divergent twin ---
 echo "== case (c): divergent twin does not zero the MAPQ =="
 # as_of <sam> <qname> <rname> -> integer of the AS:i: tag of the first match
-as_of() { mawk -v q="$2" -v c="$3" '$1==q && $3==c {
-    for(i=12;i<=NF;i++){ if(substr($i,1,5)=="AS:i:"){ print substr($i,6); exit } } }' "$1"; }
 cc_flag=$(flag_of "$TMPD/rec.sam" r-diverge chrP)
 cc_mapq=$(mapq_of "$TMPD/rec.sam" r-diverge chrP)
 [ -n "$cc_flag" ] || fail "(c) no chrP record for r-diverge"
@@ -166,6 +149,32 @@ pb_mapq=$(primary_mapq "$PARD/par.sam" r-para)
 [ -n "$pb_mapq" ] || fail "(b) no primary record for r-para"
 [ "$pb_mapq" = "0" ] || fail "(b) r-para primary MAPQ=$pb_mapq; expected 0 (paralogs must not merge)"
 ok "(b) r-para primary MAPQ=$pb_mapq (low-MAPQ multi-mapper; groups not merged)"
+
+# The MAPQ==0 check above is necessary but NOT sufficient: COPY1 and COPY2 are two
+# distinct non-ALT primary loci, so they force MAPQ 0 regardless of what
+# reconciliation does with altB — a wrongful merge of altB into COPY1's group
+# would still leave two co-scoring groups and MAPQ 0, so it passes either way.
+# Probe the grouping DIRECTLY: altB is 2*tol from COPY1 and MUST remain its own
+# group representative (parent == id); a wrongful cross-tolerance merge would set
+# its parent to COPY1's id.  This is the assertion that actually exercises the
+# paralog guard under test.
+[ -x "$EX_GROUP" ] || fail "(b) ex-group-check probe not built ($EX_GROUP); run 'make -C api-test'"
+echo "[test-reconcile] paralog grouping dump ..."
+"$EX_GROUP" "$PARD/ref.fa" "$PARD/reads.fq" 2>/dev/null > "$PARD/grp.txt"
+[ -s "$PARD/grp.txt" ] || fail "(b) ex-group-check emitted no grouping rows"
+cat "$PARD/grp.txt"
+grp_field() { # <file> <ctg> <key> -> value of key= on the first row for that ctg
+    mawk -v c="$2" -v k="$3" '
+        { ctg=""; want=""; for(i=1;i<=NF;i++){ n=index($i,"=");
+            if(n>0){ key=substr($i,1,n-1); val=substr($i,n+1);
+                     if(key=="ctg") ctg=val; if(key==k) want=val; } }
+          if(ctg==c){ print want; exit } }' "$1"
+}
+b_id=$(grp_field     "$PARD/grp.txt" chrP_altB id)
+b_parent=$(grp_field "$PARD/grp.txt" chrP_altB parent)
+[ -n "$b_id" ] && [ -n "$b_parent" ] || fail "(b) chrP_altB not present in grouping dump"
+[ "$b_parent" = "$b_id" ] || fail "(b) chrP_altB merged into another group (parent=$b_parent != id=$b_id); paralog twin 2*tol away must NOT merge"
+ok "(b) chrP_altB is its own group rep (parent=$b_parent == id=$b_id): paralog twin not merged across tolerance"
 
 # =========================================================================
 # --- case (d): chimera — disjoint query spans must NOT merge ---

@@ -16,6 +16,7 @@
 #
 # Usage: test/altlg/test-altalt.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -28,18 +29,9 @@ MK="$MDIR/test/altlg/mkfixture-altalt.sh"
 TMPD=$(mktemp -d /tmp/altlg-altalt.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
-has_bit() {
-    mawk -v f="$1" -v b="$2" 'BEGIN{ f=int(f); b=int(b);
-        printf "%d\n", (int(f / b) % 2 == 1) ? 1 : 0; }'
-}
 # primary record (no 0x100, no 0x800) fields for a qname
-primary_flag()  { mawk -v q="$2" '$1==q{f=int($2); if(int(f/256)%2==0 && int(f/2048)%2==0){print $2; exit}}' "$1"; }
 primary_rname() { mawk -v q="$2" '$1==q{f=int($2); if(int(f/256)%2==0 && int(f/2048)%2==0){print $3; exit}}' "$1"; }
-primary_mapq()  { mawk -v q="$2" '$1==q{f=int($2); if(int(f/256)%2==0 && int(f/2048)%2==0){print $5; exit}}' "$1"; }
-flag_of()       { mawk -v q="$2" -v c="$3" '$1==q && $3==c {print $2; exit}' "$1"; }
 
 # group-check field for the ALT contig hit of a qname (is_alt=1 row on <ctg>)
 grp_field() {

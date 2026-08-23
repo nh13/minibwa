@@ -35,15 +35,11 @@
 #   distinct competitor, so the multi-mapper verdict holds regardless; the
 #   assertion that proves the boundary is checked by the placement dump.
 set -eu
+. "$(dirname "$0")/fixlib.sh"
 d="$1"; mkdir -p "$d"
 
 # Unique-ish building blocks (LCG PRNG) so each region is internally unique but
 # COPY1==COPY2 exactly (the paralog).
-gen() { python3 -c "
-import random
-random.seed($1)
-print(''.join(random.choice('ACGT') for _ in range($2)))
-"; }
 
 PAD1=$(gen 1 200)
 COPY=$(gen 2 150)

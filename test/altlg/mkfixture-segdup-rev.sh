@@ -45,19 +45,10 @@
 #
 # Usage: mkfixture-segdup-rev.sh <out-dir> [N-copies]
 set -eu
+. "$(dirname "$0")/fixlib.sh"
 d="$1"; mkdir -p "$d"
 N="${2:-20}"
 
-gen() { python3 -c "
-import random
-random.seed($1)
-print(''.join(random.choice('ACGT') for _ in range($2)))
-"; }
-rc() { python3 -c "
-import sys
-s=sys.argv[1]
-print(s.translate(str.maketrans('ACGT','TGCA'))[::-1])
-" "$1"; }
 
 CORE=$(gen 100 100)        # 100bp shared seed core (segdup): on every copy + ALT
 ALTTAIL=$(gen 777 50)      # 50bp tail UNIQUE to the ALT contig (makes ALT SMEM unique)

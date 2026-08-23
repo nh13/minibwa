@@ -26,13 +26,9 @@
 #
 # Usage: mkfixture-indel.sh <out-dir>
 set -eu
+. "$(dirname "$0")/fixlib.sh"
 d="$1"; mkdir -p "$d"
 
-gen() { python3 -c "
-import random
-random.seed($1)
-print(''.join(random.choice('ACGT') for _ in range($2)))
-"; }
 
 LEFT=$(gen 11 75)          # 75bp block A (shared ALT<->primary)
 RIGHT=$(gen 22 75)         # 75bp block B (shared ALT<->primary)

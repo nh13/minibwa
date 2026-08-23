@@ -10,6 +10,7 @@
 #
 # Usage: test/altlg/test-lifttol.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -17,14 +18,8 @@ MK="$MDIR/test/altlg/mkfixture-lifttol.sh"
 
 TMPD=$(mktemp -d /tmp/altlg-lifttol.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # primary MAPQ of <qname>: the record with neither 0x100 nor 0x800 set.
-primary_mapq() {
-    mawk -v q="$2" '$1==q { f=int($2);
-        if (int(f/256)%2==0 && int(f/2048)%2==0) { print $5; exit } }' "$1"
-}
 
 echo "[test-lifttol] building fixture ..."
 /bin/sh "$MK" "$TMPD" 2>/dev/null

@@ -26,6 +26,7 @@
 #
 # Usage: test/altlg/test-noalt.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -33,18 +34,12 @@ MINIBWA="$MDIR/minibwa"
 TMPD=$(mktemp -d /tmp/altlg-noalt.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # Alignment records only: @PG carries the command line, which legitimately
 # differs between two runs we expect to align identically.
-sam_body() { mawk '$1!~/^@/{print}' "$1"; }
 
 # MAPQ of the primary (neither secondary 0x100 nor supplementary 0x800).
 # mawk has no and(), so test the two bits by arithmetic.
-primary_mapq() {
-	mawk '$1!~/^@/ && int($2/256)%2==0 && int($2/2048)%2==0 {print $5; exit}' "$1"
-}
 
 # Run `map` with the fixture and the given extra flags, into $TMPD/$1.sam.
 run() {

@@ -34,6 +34,7 @@
 #
 # Usage: test/altlg/test-pe.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -47,15 +48,9 @@ MK_RESC="$MDIR/test/altlg/mkfixture-pe-rescue.sh"
 TMPD=$(mktemp -d /tmp/altlg-pe.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # has_bit <flag> <bit> -> "1" if (flag & bit) else "0" (single power-of-two bit).
-has_bit() { mawk -v f="$1" -v b="$2" 'BEGIN{ f=int(f); b=int(b);
-    printf "%d\n", (int(f/b)%2==1)?1:0; }'; }
 # flag_of <sam> <qname> <rname> <pos> -> FLAG of the matching record (pos optional).
-flag_of() { mawk -v q="$2" -v c="$3" -v p="${4:-}" '$1==q && $3==c && (p=="" || $4==p){print $2; exit}' "$1"; }
-mapq_of() { mawk -v q="$2" -v c="$3" -v p="${4:-}" '$1==q && $3==c && (p=="" || $4==p){print $5; exit}' "$1"; }
 # proper-pair primary FLAG for a given mate-bit (0x40 first / 0x80 last).
 prim_flag_mate() { mawk -v q="$2" -v mb="$3" '$1==q { f=int($2);
     if (int(f/256)%2==0 && int(f/2048)%2==0 && int(f/mb)%2==1) { print $2; exit } }' "$1"; }

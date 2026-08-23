@@ -15,6 +15,7 @@
 #
 # Usage: test/altlg/test-hitplace.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MKFIXTURE="$MDIR/test/altlg/mkfixture-place.sh"
@@ -40,7 +41,6 @@ cat "$TMPD/place.txt"
 echo "----- coarse placement -----"
 cat "$TMPD/place-coarse.txt"
 
-fail() { echo "FAIL: $1"; exit 1; }
 
 # field extractor: print value of key=<val> on the line matching <qname> <ctg> [rev=<r>]
 # usage: field <file> <qname> <ctg> <key>            (first matching hit)

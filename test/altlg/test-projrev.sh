@@ -37,6 +37,7 @@
 #
 # Usage: test/altlg/test-projrev.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -51,11 +52,8 @@ N=20
 TMPD=$(mktemp -d /tmp/altlg-projrev.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # chrP POS lookup helpers (same style as test-segdup.sh).
-has_pos()     { mawk -v p="$2" 'BEGIN{f=0} $1!~/^@/ && $3=="chrP" && $4==p{f=1} END{print f}' "$1"; }
 mapq_at_pos() { mawk -v p="$2" '$1!~/^@/ && $3=="chrP" && $4==p{print $5; exit}' "$1"; }
 flag_at_pos() { mawk -v p="$2" '$1!~/^@/ && $3=="chrP" && $4==p{print $2; exit}' "$1"; }
 

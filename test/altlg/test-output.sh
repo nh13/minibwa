@@ -11,6 +11,7 @@
 #
 # Usage: test/altlg/test-output.sh [<minibwa-dir>]
 set -eu
+. "$(dirname "$0")/lib.sh"
 
 MDIR="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MINIBWA="$MDIR/minibwa"
@@ -18,8 +19,6 @@ MINIBWA="$MDIR/minibwa"
 TMPD=$(mktemp -d /tmp/altlg-output.XXXXXX)
 trap 'rm -rf "$TMPD"' EXIT
 
-fail() { echo "FAIL: $1"; exit 1; }
-ok()   { echo "  ok: $1"; }
 
 # ============================================================
 # Build a minimal fixture:
@@ -167,7 +166,6 @@ CHRM_FA="$MDIR/test/chrM-human.fa.gz"
 CHRM_R1="$MDIR/test/chrM-read_1.fa.gz"
 CHRM_R2="$MDIR/test/chrM-read_2.fa.gz"
 # Filter helper: strip header lines for body-only comparison
-sam_body() { mawk '$1!~/^@/{print}' "$1"; }
 
 if [ -f "$CHRM_FA" ] && [ -f "$CHRM_R1" ]; then
     # Copy and index inside TMPD rather than beside the shared fixture (same reason as

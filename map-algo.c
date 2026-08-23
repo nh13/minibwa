@@ -571,15 +571,10 @@ add_primary:
 
 /* Mark the SAM primary among the group representatives (parent==id).
  *
- * `pref` is the PE-pair-chosen endpoint (mb_pair sets it to paux.i[r] when a
- * proper pair was applied; -1 otherwise / on the SE path).  When present and it
- * survived as a representative, it IS the read's primary placement: the pair
- * score (DP + insert-size consistency) disambiguated near-equal paralog copies
- * that this per-read pass cannot (the reps are sorted by DP score then hash, so
- * among equal-scoring subtelomeric/segdup paralogs the first-by-index rep is
- * effectively arbitrary -- and was emitting a different copy than the mate-
- * consistent one the pairing chose).  Otherwise fall back to the 5'-most
- * (is_primary5) or the first representative. */
+ * Selection is per-read: the 5'-most representative (smallest query start) when
+ * is_primary5 is set, otherwise the first representative by index.  The pairing
+ * pass does not disambiguate the primary here -- upstream sets sam_pri on the
+ * pair-chosen endpoint separately (see the paired branch in pe.c). */
 int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 {
 	int32_t i, new_pri, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
@@ -652,7 +647,10 @@ void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_,
 		 * intentionally generous: over-keeping is cheap; the authoritative grouping
 		 * happens later.  Never make this tolerance tighter than MB_LIFT_TOL. */
 		if (use_lift) {
-			for (i = 0; i < n; ++i) {
+			/* --dbg-no-alt-survive ablates just this guard (testing), so a fixture
+			 * can assert the RED state (twin dropped) as well as the GREEN one. */
+			int ablate = (kom_dbg_flag & MB_DBG_NO_ALT_SURVIVE) != 0;
+			if (!ablate) for (i = 0; i < n; ++i) {
 				if (!keep[i] && r[i].is_alt) {
 					if (mb_place_matches_any(l2b, &r[i], kept_pl, n_kept, lift_tol))
 						keep[i] = 1;

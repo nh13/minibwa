@@ -23,6 +23,7 @@
 #define MB_F_PRIMARY5         (0x8000LL)    // for Hi-C
 #define MB_F_NO_PAIRING       (0x10000LL)   // don't pair reads
 #define MB_F_METH             (0x20000LL)   // methylation mode
+#define MB_F_ALT_RECORDS      (0x40000LL)   // emit ALT-contig hits with full SEQ
 
 #define MB_CIGAR_MATCH      0
 #define MB_CIGAR_INS        1
@@ -84,6 +85,7 @@ typedef struct {
 	int64_t max_mb_size;
 	int64_t max_sw_mat;
 	int64_t cap_kalloc;
+	int32_t lift_tol;  // ALT liftover-group co-location tolerance in bp (default MB_LIFT_TOL)
 } mb_opt_t;
 
 struct mb_idx_s;
@@ -113,9 +115,20 @@ typedef struct {
 	int32_t mlen, blen;
 	int32_t mapq;
 	uint32_t hash;
-	uint32_t rev:1, proper_pair:1, sam_pri:1, flt:1, inv:1, split:2, split_inv:1, rescued:1, frac_high:8, seed_ratio:8, dummy:7;
+	uint32_t rev:1, proper_pair:1, sam_pri:1, flt:1, inv:1, split:2, split_inv:1, rescued:1, frac_high:8, seed_ratio:8, is_alt:1, dummy:6;
 	mb_extra_t *p;
 } mb_hit_t;
+
+/* Co-location tolerance (bp) on the lifted footprint start used to group hits
+ * by primary locus.  Two hits are the same locus iff they share pri_tid, rev,
+ * and their lifted_st differ by no more than the tolerance.  This is the
+ * COMPILE-TIME DEFAULT; the effective value is opt->lift_tol (runtime-tunable
+ * via --alt-lift-tol), threaded into the survival guard, reconciliation, and the
+ * PE demotion guard.  Raise it for .alt files whose ALT-to-primary CIGARs carry
+ * larger indels (lifting a read start across an indel can drift lifted_st by up
+ * to the indel size); the query-span-overlap requirement guards against merging
+ * genuine paralogs even at a looser tolerance. */
+#define MB_LIFT_TOL 10
 
 struct mb_tbuf_s;
 typedef struct mb_tbuf_s mb_tbuf_t;
@@ -127,6 +140,20 @@ extern "C" {
 mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth);
 mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload);
 void mb_idx_destroy(mb_idx_t *idx);
+/* Load an ALT file from an explicit path.  Returns as l2b_set_alt() does:
+ * the number of ALT records parsed, or -1 if the file cannot be read. */
+int mb_idx_set_alt(mb_idx_t *idx, const char *fn);
+
+/**
+ * Load <prefix>.alt if it exists beside the index.
+ *
+ * Neither mb_idx_load() nor mb_idx_load_mmap() does this for you: the caller
+ * decides, so that the two loaders cannot disagree about whether a given index
+ * is ALT-aware, and so that a caller wanting stock (non-ALT) behaviour simply
+ * does not call this.  Returns the number of .alt records loaded, or -1 if the
+ * file is absent or unreadable -- the common case, and not an error.
+ */
+int mb_idx_set_alt_auto(mb_idx_t *idx, const char *prefix);
 const char *mb_idx_ctg_name(const mb_idx_t *idx, int32_t tid);
 int64_t mb_idx_ctg_len(const mb_idx_t *idx, int32_t tid);
 

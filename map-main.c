@@ -231,7 +231,11 @@ static void *worker_pipeline(void *shared, int step, void *in)
 								}
 							}
 							mb_format(km, &out, idx->l2b, t, seg_en - seg_st, &s->n_hit[seg_st], &s->hit[seg_st], j, opt, i - seg_st, mate_qlen);
-							n_sec += (h->parent != h->id);
+							/* An --alt-records hit is emitted as an extra and bypasses
+							 * the out_n cap, so it must not consume the non-ALT
+							 * secondary budget either -- otherwise it can crowd out
+							 * genuine secondaries the user asked for with -h/out_n. */
+							n_sec += (h->parent != h->id) && !alt_rec;
 						}
 					}
 				} else if (!(opt->flag & MB_F_NO_UNMAP)) {
@@ -361,6 +365,7 @@ static ko_longopt_t long_options[] = {
 	{ "dbg-an-pos",   ko_no_argument,       606 }, // anchor position
 	{ "dbg-no-alt-proj", ko_no_argument,    607 }, // ablate ALT->primary projection (testing)
 	{ "dbg-alt-proj", ko_no_argument,       608 }, // trace projected primary anchors (testing)
+	{ "dbg-no-alt-survive", ko_no_argument, 609 }, // ablate the mb_select_sub survival guard (testing)
 	{ "version",      ko_no_argument,       901 },
 	{ "help",         ko_no_argument,       902 },
 	{ 0, 0, 0 }
@@ -434,6 +439,25 @@ static inline void yes_or_no(mb_opt_t *opt, uint64_t flag, int long_idx, const c
 	}
 }
 
+/* `mem`'s own long options: exactly the knobs it implements. Sharing map's
+ * table instead would make `mem` PARSE every option map has while handling only
+ * these, so one it has no arm for -- --meth, --mmap, --outn, --eqx, --hic --
+ * would be accepted and silently dropped, and `mem --meth` would run without
+ * methylation and say nothing. Codes are shared with long_options[] so the two
+ * parsers cannot drift on what a number means. */
+static ko_longopt_t mem_long_options[] = {
+	{ "alt",          ko_required_argument, 316 },
+	{ "no-alt",       ko_no_argument,       319 },
+	{ "alt-records",  ko_no_argument,       317 },
+	{ "alt-lift-tol", ko_required_argument, 318 },
+	{ "dbg-no-alt-proj", ko_no_argument,    607 },
+	{ "dbg-alt-proj", ko_no_argument,       608 },
+	{ "dbg-no-alt-survive", ko_no_argument, 609 },
+	{ "version",      ko_no_argument,       901 },
+	{ "help",         ko_no_argument,       902 },
+	{ 0, 0, 0 }
+};
+
 static void set_ins_size(mb_opt_t *opt, const char *arg)
 {
 	char *q;
@@ -443,6 +467,32 @@ static void set_ins_size(mb_opt_t *opt, const char *arg)
 	opt->pe_lo = *q == ','? strtol(q + 1, &q, 10) : opt->pe_avg - opt->pe_std * 4;
 	if (opt->pe_lo < 1) opt->pe_lo = 1;
 	opt->flag |= MB_F_PE_PREDEF;
+}
+
+/* Resolve the .alt for a loaded index, shared by `map` and `mem` so their ALT
+ * surface stays consistent.  Returns 0 on success, 1 on a hard error (an
+ * explicitly-named --alt that will not load).  --no-alt loads nothing, leaving
+ * every ALT code path inert.  Emits a warning when --alt is overridden by
+ * --no-alt, and when an explicitly-named --alt yields zero usable records. */
+static int mb_load_alt(mb_idx_t *idx, const char *prefix, const char *alt_fn, int no_alt)
+{
+	if (no_alt) {
+		if (alt_fn)
+			fprintf(stderr, "[W::%s] --alt '%s' is ignored because --no-alt was also given\n", __func__, alt_fn);
+		return 0;
+	}
+	if (alt_fn) { /* explicitly named: failure to load is a user error */
+		int nr = mb_idx_set_alt(idx, alt_fn);
+		if (nr < 0) {
+			fprintf(stderr, "[ERROR] failed to load the ALT file '%s'\n", alt_fn);
+			return 1;
+		}
+		if (nr == 0)
+			fprintf(stderr, "[W::%s] --alt '%s' loaded 0 usable ALT records; running as if without a .alt\n", __func__, alt_fn);
+	} else { /* auto: an absent adjacent .alt is the normal case, not an error */
+		mb_idx_set_alt_auto(idx, prefix);
+	}
+	return 0;
 }
 
 int main_map(int argc, char *argv[])
@@ -552,6 +602,8 @@ int main_map(int argc, char *argv[])
 			kom_dbg_flag |= MB_DBG_NO_ALT_PROJ;
 		} else if (c == 608) { // --dbg-alt-proj
 			kom_dbg_flag |= MB_DBG_ALT_PROJ;
+		} else if (c == 609) { // --dbg-no-alt-survive
+			kom_dbg_flag |= MB_DBG_NO_ALT_SURVIVE;
 		} else if (c == 'K') {
 			mo.mb_size = mo.max_mb_size = kom_parse_num(o.arg, &s);
 			if (*s == ',') mo.max_mb_size = kom_parse_num(s + 1, &s);
@@ -590,16 +642,8 @@ int main_map(int argc, char *argv[])
 	 * normal path cannot disagree about whether this index is ALT-aware.  --no-alt
 	 * loads nothing at all, which leaves every ALT code path inert -- is_alt is set
 	 * only by l2b_set_alt(), never stored in the index. */
-	if (!no_alt) {
-		/* An absent adjacent .alt is the normal case, so the auto branch ignores its
-		 * status.  An explicitly named one that will not load is a user error. */
-		if (alt_fn) {
-			if (mb_idx_set_alt(idx, alt_fn) < 0) {
-				fprintf(stderr, "[ERROR] failed to load the ALT file '%s'\n", alt_fn);
-				return 1;
-			}
-		} else mb_idx_set_alt_auto(idx, argv[o.ind]);
-	}
+	if (mb_load_alt(idx, argv[o.ind], alt_fn, no_alt) != 0)
+		return 1;
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 
@@ -647,7 +691,11 @@ static int usage_mem(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -R STR         SAM read group line in a format like '@RG\\tID:foo\\tSM:bar' []\n");
 	fprintf(fp, "    -H STR         if STR starts with @, insert to header; or insert lines in file STR []\n");
 	fprintf(fp, "    -o FILE        output file name [stdout]\n");
-	fprintf(fp, "    *j             treat ALT contigs as part of the primary assembly\n");
+	fprintf(fp, "    --no-alt       ignore <idx>.alt; align as if no ALT file exists\n");
+	fprintf(fp, "    --alt FILE     path to the .alt file (default: auto-detected <idx>.alt)\n");
+	fprintf(fp, "    --alt-records  emit ALT-contig alignments with full SEQ\n");
+	fprintf(fp, "    --alt-lift-tol INT  bp tolerance for grouping ALT twins by lifted locus [%d]\n", MB_LIFT_TOL);
+	fprintf(fp, "    *j             (bwa) treat ALT as primary; minibwa uses the liftover-group scheme above instead\n");
 	fprintf(fp, "    -5             take the alignment with the smallest query position as primary\n");
 	fprintf(fp, "    *q             don't modify mapQ of supplementary alignments\n");
 	fprintf(fp, "    *K NUM         batch size []\n");
@@ -666,6 +714,8 @@ static int usage_mem(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "Notes:\n");
 	fprintf(fp, "  - \"minibwa mem\" aims to match the \"bwa mem\" command-line interface\n");
 	fprintf(fp, "  - '*' options are ignored as they are missing or incompatible with minibwa\n");
+	fprintf(fp, "  - an adjacent <idx>.alt is auto-loaded and applied (liftover-group ALT\n");
+	fprintf(fp, "    awareness); pass --no-alt to disable it\n");
 	fprintf(fp, "  - minibwa and bwa-mem may output different alignments\n");
 	return fp == stdout? 0 : 1;
 }
@@ -676,12 +726,19 @@ int main_mem(int argc, char *argv[])
 	ketopt_t o = KETOPT_INIT;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0;
+	const char *alt_fn = 0;
+	int32_t no_alt = 0;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 	mb_idx_t *idx;
 
 	mb_opt_init(&mo);
 	mo.flag |= MB_F_WRITE_MD; // bwa-mem always writes MD
-	while ((c = ketopt(&o, argc, argv, 1, "t:k:w:d:r:y:c:D:W:m:SPA:B:O:E:L:U:x:pR:H:o:j5qK:v:T:h:z:aCVYMuI:", 0)) >= 0) {
+	/* mem_long_options carries minibwa's ALT knobs (--alt/--no-alt/--alt-records/
+	 * --alt-lift-tol and the --dbg-* diagnostics), so `mem` exposes the same ALT
+	 * surface as `map` rather than silently auto-loading .alt with no way to
+	 * override or disable it -- but only those, so an option `mem` does not
+	 * implement is rejected below instead of parsed and ignored. */
+	while ((c = ketopt(&o, argc, argv, 1, "t:k:w:d:r:y:c:D:W:m:SPA:B:O:E:L:U:x:pR:H:o:j5qK:v:T:h:z:aCVYMuI:", mem_long_options)) >= 0) {
 		// algorithm
 		if (c == 't') mo.n_thread = atoi(o.arg);
 		else if (c == 'k') mo.min_len = atoi(o.arg);
@@ -709,12 +766,31 @@ int main_mem(int argc, char *argv[])
 		else if (c == 'C') mo.flag |= MB_F_COPY_COMMENT;
 		else if (c == 'Y') mo.flag |= MB_F_SUPP_SOFT;
 		else if (c == 'I') set_ins_size(&mo, o.arg);
+		// ALT liftover-group knobs (shared with `map` via long_options)
+		else if (c == 316) alt_fn = o.arg;               // --alt
+		else if (c == 317) mo.flag |= MB_F_ALT_RECORDS;  // --alt-records
+		else if (c == 318) { mo.lift_tol = atoi(o.arg); if (mo.lift_tol < 0) mo.lift_tol = 0; } // --alt-lift-tol
+		else if (c == 319) no_alt = 1;                   // --no-alt
+		else if (c == 607) kom_dbg_flag |= MB_DBG_NO_ALT_PROJ; // --dbg-no-alt-proj
+		else if (c == 608) kom_dbg_flag |= MB_DBG_ALT_PROJ;    // --dbg-alt-proj
+		else if (c == 609) kom_dbg_flag |= MB_DBG_NO_ALT_SURVIVE; // --dbg-no-alt-survive
+		else if (c == 901) { puts(MB_VERSION); return 0; }
+		else if (c == 902) return usage_mem(stdout, &mo);
+		/* Reject what map rejects, rather than swallowing it. */
+		else if (c == ':') {
+			fprintf(stderr, "[ERROR] missing option argument\n");
+			return 1;
+		} else if (c == '?') {
+			fprintf(stderr, "[ERROR] unknown option in \"%s\"\n", argv[o.erri]);
+			return 1;
+		}
 	}
 	if (argc - o.ind < 2) return usage_mem(stderr, &mo);
 
 	idx = mb_idx_load(argv[o.ind], !!(mo.flag & MB_F_METH));
 	kom_assert(idx, "failed to load the index.");
-	mb_idx_set_alt_auto(idx, argv[o.ind]); /* as main_map does; the loader no longer resolves it */
+	if (mb_load_alt(idx, argv[o.ind], alt_fn, no_alt) != 0)
+		return 1;
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());
 

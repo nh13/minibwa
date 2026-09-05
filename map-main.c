@@ -347,9 +347,9 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
-	{ "index-regime", ko_required_argument, 316 },
-	{ "index-mem",    ko_required_argument, 317 },
-	{ "list-regimes", ko_no_argument,       318 },
+	{ "index-regime", ko_required_argument, 323 },
+	{ "index-mem",    ko_required_argument, 324 },
+	{ "list-regimes", ko_no_argument,       325 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -522,12 +522,12 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
-		} else if (c == 316) { // --index-regime
+		} else if (c == 323) { // --index-regime
 			// "auto" is the default automatic selection, not a regime name: keep it NULL
 			forced_regime = strcmp(o.arg, "auto") == 0 ? NULL : o.arg;
-		} else if (c == 317) { // --index-mem
+		} else if (c == 324) { // --index-mem
 			index_mem_cap = kom_parse_num(o.arg, 0);
-		} else if (c == 318) { // --list-regimes
+		} else if (c == 325) { // --list-regimes
 			list_regimes = 1;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;

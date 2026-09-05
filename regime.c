@@ -1,12 +1,14 @@
 #include "regime.h"
 #include "kommon.h"
+#include "bwt.h" /* MB_SA_MAGIC: the sidecar SA on-disk magic, validated in mb_regime_discover */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <glob.h>
 #if defined(__APPLE__)
-#include <sys/sysctl.h>
+#include <mach/mach.h>
 #endif
 
 /* Fixed safety margin added on top of the raw on-disk footprint when
@@ -74,9 +76,17 @@ int mb_regime_pick(const mb_regime_t *r, int n, uint64_t budget, uint32_t mode, 
 
 static uint64_t host_avail_bytes(void){
 #if defined(__APPLE__)
-	int mib[2] = { CTL_HW, HW_MEMSIZE }; uint64_t v = 0; size_t len = sizeof v;
-	if (sysctl(mib, 2, &v, &len, NULL, 0) == 0) return v;
-	return 0;
+	// Available (not total) memory: free + inactive + speculative pages. HW_MEMSIZE
+	// would report total installed RAM, which mb_mem_budget() then hands to the regime
+	// picker -- selecting a regime that does not fit what is actually free would OOM at
+	// index load. Mirrors the Linux MemAvailable path below. 0 on any failure ("unknown").
+	mach_port_t self = mach_host_self();
+	vm_size_t page = 0;
+	vm_statistics64_data_t vm;
+	mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
+	if (host_page_size(self, &page) != KERN_SUCCESS) return 0;
+	if (host_statistics64(self, HOST_VM_INFO64, (host_info64_t)&vm, &cnt) != KERN_SUCCESS) return 0;
+	return ((uint64_t)vm.free_count + vm.inactive_count + vm.speculative_count) * (uint64_t)page;
 #else
 	FILE *fp = fopen("/proc/meminfo","r"); char k[64]; unsigned long kb;
 	if (!fp) return 0;
@@ -104,10 +114,16 @@ static uint64_t cgroup_limit_bytes(void){
 			size_t bl;
 			fclose(fp);
 			bl = strlen(b);
+			char *end;
 			while (bl > 0 && (b[bl-1] == '\n' || b[bl-1] == '\r')) b[--bl] = '\0'; // trim for a clean warning
-			if (!strncmp(b,"max",3)) return 0; // explicit "no limit" sentinel, not an anomaly
-			v=strtoull(b,0,10);
-			if (v && v < (1ULL<<62)) return v;
+			if (!strcmp(b,"max")) return 0; // explicit "no limit" sentinel -- exact match, so "maximal" and the like are not mistaken for it
+			// Require a complete, in-range numeric value: reject an empty field, a
+			// partial conversion with trailing junk ("123x"), and strtoull overflow
+			// (ERANGE). Applying a partial value here would set a bogus low budget and
+			// wrongly reject every regime instead of taking the fail-open path below.
+			errno = 0;
+			v=strtoull(b,&end,10);
+			if (end != b && *end == '\0' && errno == 0 && v && v < (1ULL<<62)) return v;
 			if (kom_verbose >= 2)
 				fprintf(stderr, "[W::mb_mem_budget] cgroup v2 memory.max has an unparseable/out-of-range value (\"%s\"); treating as unlimited\n", b);
 			return 0;
@@ -117,15 +133,23 @@ static uint64_t cgroup_limit_bytes(void){
 		fclose(fp);
 	}
 	if ((fp=fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes","r"))){
-		if (fscanf(fp,"%llu",&v)==1){
+		char b[64];
+		if (fgets(b,sizeof b,fp)){
+			size_t bl;
+			char *end;
 			fclose(fp);
-			if (v && v < (1ULL<<62)) return v;
+			bl = strlen(b);
+			while (bl > 0 && (b[bl-1] == '\n' || b[bl-1] == '\r')) b[--bl] = '\0';
+			// Same strict parse as the v2 path above: complete, in-range, no overflow.
+			errno = 0;
+			v=strtoull(b,&end,10);
+			if (end != b && *end == '\0' && errno == 0 && v && v < (1ULL<<62)) return v;
 			if (kom_verbose >= 2)
-				fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes has an out-of-range value (%llu); treating as unlimited\n", v);
+				fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes has an unparseable/out-of-range value (\"%s\"); treating as unlimited\n", b);
 			return 0;
 		}
 		if (kom_verbose >= 2)
-			fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes is present but unparseable; treating as unlimited\n");
+			fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes is present but unreadable; treating as unlimited\n");
 		fclose(fp);
 	}
 	return 0;
@@ -164,6 +188,19 @@ static int read_u64_at(const char *path, long offset, uint64_t *out){
 	size_t n = fread(out, 8, 1, fp);
 	fclose(fp);
 	return n == 1 ? 0 : -1;
+}
+
+/* Read `len` raw bytes at byte offset `offset` in `path` into `buf`. Returns 0
+ * on success, -1 if the file can't be opened, seeked, or is too short. Used to
+ * read the sidecar magic for validation (a byte compare, so endianness-safe
+ * unlike read_u32_at). */
+static int read_bytes_at(const char *path, long offset, void *buf, size_t len){
+	FILE *fp = fopen(path, "rb");
+	if (!fp) return -1;
+	if (fseek(fp, offset, SEEK_SET) != 0) { fclose(fp); return -1; }
+	size_t n = fread(buf, 1, len, fp);
+	fclose(fp);
+	return n == len ? 0 : -1;
 }
 
 /* RAM estimate for a regime whose SA is sampled at 1/(1<<u): everything the
@@ -284,6 +321,35 @@ int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_reg
 				if (read_u32_at(side, 4, &side_sa_bit) != 0) continue;
 				if (side_sa_bit >= 32) continue; /* corrupt sidecar header: guards 1U<<sa_bit below */
 				if (side_sa_bit == bundled_sa_bit) continue; /* de-dup: redundant with the bundled regime */
+				/* Fully validate the sidecar before registering it. mb_regime_pick()
+				 * may prefer a sparser sidecar (higher speed_rank) over the bundled
+				 * regime; a malformed one registered here would then be selected only
+				 * to fail at mb_bwt_load_sa(), which aborts with no fallback. Mirror
+				 * the loader's own checks -- the MB_SA_MAGIC header, the SA count
+				 * expected from seq_len, and a complete on-disk payload -- so a corrupt
+				 * sidecar is skipped at discovery instead. The reference fingerprint is
+				 * NOT part of the sidecar (it lives separately in <prefix>.mbw.fp), so
+				 * it is deliberately not required here. */
+				{
+					char magic[4];
+					uint64_t side_n_sa, expected_n_sa;
+					if (read_bytes_at(side, 0, magic, 4) != 0 || memcmp(magic, MB_SA_MAGIC, 4) != 0) {
+						if (kom_verbose >= 2)
+							fprintf(stderr, "[W::mb_regime_discover] sidecar has a bad magic, skipping: %s\n", side);
+						continue;
+					}
+					if (read_u64_at(side, 8, &side_n_sa) != 0) continue;
+					expected_n_sa = (seq_len + (1ULL<<side_sa_bit)) >> side_sa_bit;
+					/* payload begins at offset 16 == magic[4] + sa_bit[4] + n_sa[8]. The
+					 * count check runs first, so a garbage-huge side_n_sa short-circuits
+					 * before the size arithmetic. */
+					if (side_n_sa != expected_n_sa ||
+					    (uint64_t)st_side.st_size != 16 + side_n_sa * 8) {
+						if (kom_verbose >= 2)
+							fprintf(stderr, "[W::mb_regime_discover] sidecar SA count/size mismatch, skipping: %s\n", side);
+						continue;
+					}
+				}
 				fill_bwt_regime(&out[n], (int)side_sa_bit,
 					est_ram_for(l2b_size, bwt_portion, seq_len, (int)side_sa_bit), side, is_meth);
 				n++;

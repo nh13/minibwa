@@ -1,0 +1,14 @@
+.*.swp
+*.o
+*.a
+Makefile.bak
+minibwa
+tmp
+<<<<<<<
+.build-mode
+=======
+__pycache__/
+api-test/mbmap-one
+api-test/mbmap-batch
+.superpowers/
+>>>>>>>

@@ -1,0 +1,380 @@
+#include "regime.h"
+#include "kommon.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <glob.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+#ifdef MB_HAVE_B2
+#include "b2idx.h"
+#endif
+
+/* Fixed safety margin added on top of the raw on-disk footprint when
+ * estimating a regime's peak RAM: covers query buffers, thread-local
+ * scratch, and the fact that l2b/mbw file sizes are a conservative proxy
+ * for their in-memory representation (over-estimating is the safe
+ * direction here). */
+#define MB_REGIME_MARGIN 2684354560ULL /* 2.5 GiB */
+
+/* A regime is "mmap-resident" -- demand-paged with near-zero resident RAM, so
+ * exempt from the memory budget -- only when the caller asked for --mmap AND the
+ * regime's SA is bundled in the .mbw (sa_path==""). A sidecar-SA regime always
+ * heap-loads its SA (mb_bwt_load_nosa + mb_bwt_load_sa) even under --mmap, so it
+ * must still be gated by the real budget; otherwise auto-select could pick a
+ * dense sidecar under --mmap and OOM. */
+static int mb_regime_mmap_resident(const mb_regime_t *rg, int use_mmap){
+	return use_mmap && rg->sa_path[0] == '\0';
+}
+
+int mb_regime_pick(const mb_regime_t *r, int n, uint64_t budget, uint32_t mode, int use_mmap, const char *forced){
+	int best = -1;
+
+	if (forced) {
+		for (int i = 0; i < n; ++i) {
+			if (!(r[i].mode_mask & mode)) continue;
+			if (strcmp(r[i].name, forced) == 0) return i;
+		}
+		return -1;
+	}
+
+	/* Preferred pass: highest speed_rank among mode-eligible, on-frontier
+	 * (speed_rank >= 0) regimes that fit the budget (mmap-resident regimes are
+	 * budget-exempt; sidecar regimes are gated even under --mmap). */
+	for (int i = 0; i < n; ++i) {
+		if (!(r[i].mode_mask & mode)) continue;
+		if (r[i].speed_rank < 0) continue;
+		if (!mb_regime_mmap_resident(&r[i], use_mmap) && r[i].est_ram > budget) continue;
+		if (best < 0 || r[i].speed_rank > r[best].speed_rank) best = i;
+	}
+	if (best >= 0) return best;
+
+	/* Fallback: nothing fit the budget on the preferred pass (or every
+	 * mode-eligible regime is off-frontier) -- auto-pick must never return
+	 * -1 while at least one mode-eligible regime exists, so fall back to
+	 * whichever mode-eligible regime has the smallest est_ram, irrespective
+	 * of rank or budget. */
+	for (int i = 0; i < n; ++i) {
+		if (!(r[i].mode_mask & mode)) continue;
+		if (best < 0 || r[i].est_ram < r[best].est_ram) best = i;
+	}
+	return best;
+}
+
+static uint64_t host_avail_bytes(void){
+#if defined(__APPLE__)
+	int mib[2] = { CTL_HW, HW_MEMSIZE }; uint64_t v = 0; size_t len = sizeof v;
+	if (sysctl(mib, 2, &v, &len, NULL, 0) == 0) return v;
+	return 0;
+#else
+	FILE *fp = fopen("/proc/meminfo","r"); char k[64]; unsigned long kb;
+	if (!fp) return 0;
+	while (fscanf(fp,"%63s %lu kB\n",k,&kb)==2)
+		if (strcmp(k,"MemAvailable:")==0){ fclose(fp); return (uint64_t)kb*1024ULL; }
+	fclose(fp); return 0;
+#endif
+}
+/* cgroup v2 then v1 memory limit, in bytes; 0 means "no limit / not
+ * applicable". Fail-open policy (deliberate): whenever the limit can't be
+ * determined -- no cgroup file at this path (the common case outside a
+ * container: not an error), the explicit v2 "max" sentinel, or a value that
+ * fails to parse or is out of a sane range -- we return 0 (unlimited) so a
+ * broken or absent cgroup never blocks mapping outright; mb_mem_budget()
+ * still has host_avail_bytes() and the optional user cap as backstops. The
+ * silent case (file absent) is normal and stays silent; a file that IS
+ * present but whose value we can't make sense of is an anomaly worth a
+ * diagnostic, so that case warns under kom_verbose instead of failing
+ * silently. */
+static uint64_t cgroup_limit_bytes(void){
+	unsigned long long v; FILE *fp;
+	if ((fp=fopen("/sys/fs/cgroup/memory.max","r"))){
+		char b[64];
+		if (fgets(b,sizeof b,fp)){
+			size_t bl;
+			fclose(fp);
+			bl = strlen(b);
+			while (bl > 0 && (b[bl-1] == '\n' || b[bl-1] == '\r')) b[--bl] = '\0'; // trim for a clean warning
+			if (!strncmp(b,"max",3)) return 0; // explicit "no limit" sentinel, not an anomaly
+			v=strtoull(b,0,10);
+			if (v && v < (1ULL<<62)) return v;
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::mb_mem_budget] cgroup v2 memory.max has an unparseable/out-of-range value (\"%s\"); treating as unlimited\n", b);
+			return 0;
+		}
+		if (kom_verbose >= 2)
+			fprintf(stderr, "[W::mb_mem_budget] cgroup v2 memory.max is present but unreadable; treating as unlimited\n");
+		fclose(fp);
+	}
+	if ((fp=fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes","r"))){
+		if (fscanf(fp,"%llu",&v)==1){
+			fclose(fp);
+			if (v && v < (1ULL<<62)) return v;
+			if (kom_verbose >= 2)
+				fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes has an out-of-range value (%llu); treating as unlimited\n", v);
+			return 0;
+		}
+		if (kom_verbose >= 2)
+			fprintf(stderr, "[W::mb_mem_budget] cgroup v1 memory.limit_in_bytes is present but unparseable; treating as unlimited\n");
+		fclose(fp);
+	}
+	return 0;
+}
+uint64_t mb_mem_budget(uint64_t user_cap){
+	uint64_t host = host_avail_bytes(), cg = cgroup_limit_bytes();
+	uint64_t b = 0; // 0 == "no budget determined yet"
+	// Fold in each constraint that is set (nonzero), taking the min. Seeding `b`
+	// from the first nonzero value (rather than from host) is essential: when
+	// host probing fails (host==0), the old `b=host` left b at 0, and `cg < 0` /
+	// `user_cap < 0` are never true for unsigned, so a real cgroup or --index-mem
+	// cap was silently dropped and the selector saw an unbounded budget.
+	if (host)                            b = host;
+	if (cg       && (b == 0 || cg < b))       b = cg;
+	if (user_cap && (b == 0 || user_cap < b)) b = user_cap;
+	return b;
+}
+
+/* Read a big/little-endian-agnostic (host-native) uint32 at byte offset
+ * `offset` in `path`. Returns 0 on success, -1 if the file can't be opened,
+ * seeked, or doesn't have enough bytes there. */
+static int read_u32_at(const char *path, long offset, uint32_t *out){
+	FILE *fp = fopen(path, "rb");
+	if (!fp) return -1;
+	if (fseek(fp, offset, SEEK_SET) != 0) { fclose(fp); return -1; }
+	size_t n = fread(out, 4, 1, fp);
+	fclose(fp);
+	return n == 1 ? 0 : -1;
+}
+
+/* Same as read_u32_at but for a host-native uint64. */
+static int read_u64_at(const char *path, long offset, uint64_t *out){
+	FILE *fp = fopen(path, "rb");
+	if (!fp) return -1;
+	if (fseek(fp, offset, SEEK_SET) != 0) { fclose(fp); return -1; }
+	size_t n = fread(out, 8, 1, fp);
+	fclose(fp);
+	return n == 1 ? 0 : -1;
+}
+
+/* RAM estimate for a regime whose SA is sampled at 1/(1<<u): everything the
+ * bundled .mbw holds *except* its own SA (bwt_portion), plus this regime's
+ * own SA footprint (sampled from seq_len at rate u), plus the .l2b and the
+ * fixed safety margin. See mb_regime_discover for how bwt_portion and
+ * seq_len are derived. */
+static uint64_t est_ram_for(uint64_t l2b_size, uint64_t bwt_portion, uint64_t seq_len, int u){
+	uint64_t sa_bytes = ((seq_len + (1ULL<<u)) >> u) * 8;
+	return l2b_size + bwt_portion + sa_bytes + MB_REGIME_MARGIN;
+}
+
+/* speed_rank for a BWT-backend regime: denser sampling (smaller sa_bit) is
+ * faster to query, so it ranks higher. sa_bit < 3 (denser than 1/8) is
+ * off the supported frontier for M2 -- such a regime may still be present
+ * (e.g. a leftover sidecar) but must never be auto-picked, hence rank -1. */
+static int bwt_speed_rank(int sa_bit){
+	return sa_bit < 3 ? -1 : 2 * (6 - sa_bit);
+}
+
+static void fill_bwt_regime(mb_regime_t *rg, int sa_bit, uint64_t est_ram, const char *sa_path, int is_meth){
+	memset(rg, 0, sizeof *rg);
+	rg->backend = MB_BACKEND_BWT;
+	rg->sa_bit = sa_bit;
+	rg->est_ram = est_ram;
+	rg->speed_rank = bwt_speed_rank(sa_bit);
+	rg->is_meth = is_meth;
+	/* A methylated index (<prefix>.meth.mbw) maps only in --meth mode; a normal
+	 * index handles SR/PE, Hi-C and long-read (all use the classic BWT) but not
+	 * meth, which needs the converted .meth.mbw. */
+	rg->mode_mask = is_meth ? MB_MODE_METH : (MB_MODE_SRPE | MB_MODE_HIC | MB_MODE_LR);
+	snprintf(rg->name, sizeof rg->name, "sa%d", 1 << sa_bit);
+	if (sa_path) snprintf(rg->sa_path, sizeof rg->sa_path, "%s", sa_path); // caller rejects overlong paths first
+	else rg->sa_path[0] = '\0';
+}
+
+/* Discover on-disk SA-density regimes for `prefix`:
+ *  - the density bundled in <prefix>.mbw (sa_path == ""), read from the
+ *    4-byte sa_bit field at offset 4 of the .mbw header; and
+ *  - one regime per <prefix>.sa.u* sidecar, read the same way from offset 4
+ *    of the sidecar (its header is magic[4], sa_bit u32 @4, n_sa u64 @8, ...).
+ * A sidecar whose sa_bit matches the bundled density is skipped -- it is a
+ * redundant duplicate of the bundled regime, so listing it again would just
+ * clutter `mb_regime_list_print` and `auto` picking without adding a
+ * reachable option.
+ * When `b2_available` (compiled with MB_HAVE_B2 and the caller says the
+ * backend is usable) and a co-located bwa-mem3 cp_occ index is present
+ * (<prefix>.bwt.2bit.64 + .pac + .amb + .ann), also discover one
+ * MB_BACKEND_CP_OCC regime named "sa%d-b2" for its SA sampling rate. */
+int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_regime_t *out, int max){
+	char fn_l2b[1152], fn_mbw[1152];
+	struct stat st_l2b, st_mbw;
+	uint32_t bundled_sa_bit = 0;
+	uint64_t l2b_size = 0, mbw_size = 0, seq_len = 0, bundled_sa_bytes, bwt_portion = 0;
+	int n = 0, have_native;
+
+	if (!prefix || !out || max <= 0) return 0;
+
+	/* A methylated index lives at <prefix>.meth.mbw (built by `index --meth`); the
+	 * .l2b is shared with the normal index. Multi-density -u is rejected together
+	 * with --meth at index time, so a meth index is always a single bundled
+	 * regime -- no .sa.u* sidecars to enumerate. */
+	snprintf(fn_l2b, sizeof fn_l2b, "%s.l2b", prefix);
+	snprintf(fn_mbw, sizeof fn_mbw, is_meth? "%s.meth.mbw" : "%s.mbw", prefix);
+
+	/* Phase-2: minibwa's own .l2b/.mbw are optional -- a cp_occ-only index
+	 * (bwa-mem3's .bwt.2bit.64/.pac/.amb/.ann with no .l2b/.mbw alongside)
+	 * is valid and offers only the cp_occ regime discovered below. Only
+	 * bail early when NEITHER backend's files are present at all; a missing
+	 * .l2b/.mbw simply skips the native bundled/sidecar regimes instead of
+	 * failing discovery outright. */
+	have_native = stat(fn_l2b, &st_l2b) == 0 && stat(fn_mbw, &st_mbw) == 0;
+	/* A present-but-unreadable .mbw header (truncated/corrupt file) drops the
+	 * native BWT regimes rather than aborting discovery -- the index may still
+	 * offer a cp_occ regime. Warn so the degrade is not silent (the old code
+	 * failed hard here; the fall-through to cp_occ is easy to miss). */
+	if (have_native && read_u32_at(fn_mbw, 4, &bundled_sa_bit) != 0) {
+		if (kom_verbose >= 1) fprintf(stderr, "[WARNING] '%s' is present but its header could not be read; ignoring native BWT regime(s)\n", fn_mbw);
+		have_native = 0;
+	}
+	/* An out-of-range bundled sa_bit (>=32, or the (uint32_t)-1 no-SA sentinel)
+	 * is a corrupt/unusable native header: skip the native regimes rather than
+	 * fail all discovery, before it reaches the 1<<sa_bit / 1ULL<<sa_bit shifts
+	 * below (>=64 would be undefined behaviour). cp_occ discovery still proceeds. */
+	if (have_native && bundled_sa_bit >= 32) have_native = 0;
+	/* .mbw header: magic[4], sa_bit u32 @4, primary u64 @8, L2[1..4] 4*u64 @16
+	 * -- L2[4] (== seq_len) is at offset 16 + 3*8 = 40. */
+	if (have_native && read_u64_at(fn_mbw, 40, &seq_len) != 0) {
+		if (kom_verbose >= 1) fprintf(stderr, "[WARNING] '%s' header is truncated (cannot read seq_len); ignoring native BWT regime(s)\n", fn_mbw);
+		have_native = 0;
+	}
+
+	if (have_native) {
+		l2b_size = (uint64_t)st_l2b.st_size;
+		mbw_size = (uint64_t)st_mbw.st_size;
+
+		/* mbw_size already contains the bundled SA; subtract it out so every
+		 * regime's estimate is built from the same BWT-only base plus its own
+		 * SA footprint -- otherwise a sparser sidecar regime (smaller SA) would
+		 * be estimated as *larger* than the bundled (dense) regime, since
+		 * mbw_size's bundled SA would be double counted on top of it. */
+		bundled_sa_bytes = ((seq_len + (1ULL<<bundled_sa_bit)) >> bundled_sa_bit) * 8;
+		bwt_portion = bundled_sa_bytes > mbw_size ? 0 : mbw_size - bundled_sa_bytes;
+
+		/* The bundled regime: its SA lives inside .mbw itself. */
+		if (n < max) {
+			fill_bwt_regime(&out[n], (int)bundled_sa_bit,
+				est_ram_for(l2b_size, bwt_portion, seq_len, (int)bundled_sa_bit), NULL, is_meth);
+			n++;
+		}
+
+		/* Sidecar regimes: <prefix>.sa.u* -- only for a normal index. A meth index
+		 * never has sidecars (multi-density -u is rejected with --meth). */
+		if (!is_meth) {
+			char pattern[1152];
+			glob_t gl;
+			snprintf(pattern, sizeof pattern, "%s.sa.u*", prefix);
+			memset(&gl, 0, sizeof gl);
+			if (glob(pattern, 0, NULL, &gl) == 0) {
+				size_t i;
+				for (i = 0; i < gl.gl_pathc && n < max; ++i) {
+					const char *side = gl.gl_pathv[i];
+					struct stat st_side;
+					uint32_t side_sa_bit;
+					if (stat(side, &st_side) != 0) continue; /* validates the sidecar exists/is readable */
+					/* A path that would not fit mb_regime_t.sa_path is unusable: it
+					 * would be truncated before mb_bwt_load_sa() could open it, so
+					 * skip it explicitly rather than register a silently broken
+					 * regime. (The base .mbw path is built dynamically at load, so
+					 * long prefixes still work for the bundled regime.) */
+					if (strlen(side) >= sizeof out[n].sa_path) {
+						if (kom_verbose >= 2)
+							fprintf(stderr, "[W::mb_regime_discover] sidecar path too long, skipping: %s\n", side);
+						continue;
+					}
+					if (read_u32_at(side, 4, &side_sa_bit) != 0) continue;
+					if (side_sa_bit >= 32) continue; /* corrupt sidecar header: guards 1<<sa_bit below */
+					if (side_sa_bit == bundled_sa_bit) continue; /* de-dup: redundant with the bundled regime */
+					fill_bwt_regime(&out[n], (int)side_sa_bit,
+						est_ram_for(l2b_size, bwt_portion, seq_len, (int)side_sa_bit), side, is_meth);
+					n++;
+				}
+			}
+			globfree(&gl);
+		}
+	}
+
+#ifdef MB_HAVE_B2
+	/* cp_occ regime: a second SA-lookup backend (bwa-mem2/bwa-mem3's
+	 * checkpointed OCC structure) that trades RAM for SMEM/SA-lookup speed.
+	 * Only offered when the caller says the backend is compiled in AND a
+	 * co-located bwa-mem3 index is present for this prefix. */
+	if (b2_available && n < max) {
+		char fn_b2[1152], fn_pac[1152], fn_amb[1152], fn_ann[1152];
+		struct stat st_b2, st_pac, st_amb, st_ann;
+		snprintf(fn_b2,  sizeof fn_b2,  "%s.bwt.2bit.64", prefix);
+		snprintf(fn_pac, sizeof fn_pac, "%s.pac", prefix);
+		snprintf(fn_amb, sizeof fn_amb, "%s.amb", prefix);
+		snprintf(fn_ann, sizeof fn_ann, "%s.ann", prefix);
+		if (stat(fn_b2, &st_b2) == 0 && stat(fn_pac, &st_pac) == 0 &&
+		    stat(fn_amb, &st_amb) == 0 && stat(fn_ann, &st_ann) == 0) {
+			int intv = mb_b2_peek_sa_intv(prefix); /* 8, 16, ... or -1 if absent */
+			if (intv > 0) {
+				mb_regime_t *g = &out[n];
+				int sa_bit;
+				for (sa_bit = 0; (1 << sa_bit) < intv; ++sa_bit) {} /* log2(intv) */
+				memset(g, 0, sizeof *g);
+				g->backend = MB_BACKEND_CP_OCC;
+				g->sa_bit = sa_bit;
+				snprintf(g->name, sizeof g->name, "sa%d-b2", intv);
+				g->est_ram = (uint64_t)st_b2.st_size + (uint64_t)st_pac.st_size + MB_REGIME_MARGIN;
+				/* +1 places a cp_occ regime just above the same-density BWT
+				 * rung (cp_occ's SMEM search has a per-step edge over
+				 * classic-BWT rank at equal sampling density). The full
+				 * cross-backend grid rank -- e.g. sa16-b2 vs sa8 -- was
+				 * confirmed by the manual hg38 campaign (see
+				 * docs/sa-density-and-backends.md): cp_occ adds ~5-12% over
+				 * native at equal density, and cp_occ 1/4 even beats native
+				 * 1/1, so the +1 ordering holds.
+				 *
+				 * Unlike the native ladder (which clamps sa_bit<3 to -1 so
+				 * auto-select never prefers a denser-than-1/8 BWT), cp_occ
+				 * has NO off-frontier clamp ON PURPOSE: the campaign showed
+				 * the denser cp_occ regimes (sa4-b2 at ~1.27x is the value
+				 * sweet spot, beating native 1/1 at a third of the RAM) are
+				 * worth auto-picking when present, so they stay on-frontier. */
+				g->speed_rank = 2 * (6 - sa_bit) + 1;
+				g->mode_mask = MB_MODE_SRPE; /* SR/PE only: not eligible for meth/hic/lr */
+				g->sa_path[0] = '\0';
+				n++;
+			}
+		}
+	}
+#else
+	(void)b2_available; /* M3's cp_occ backend isn't compiled in; nothing to discover */
+#endif
+
+	return n;
+}
+
+void mb_regime_list_print(FILE *fp, const mb_regime_t *r, int n){
+	int i;
+	fprintf(fp, "%-10s %-8s %-10s %12s %6s  %s\n",
+		"name", "backend", "sampling", "est-RAM(GB)", "rank", "modes");
+	for (i = 0; i < n; ++i) {
+		char modes[32];
+		size_t len;
+		modes[0] = '\0';
+		if (r[i].mode_mask & MB_MODE_SRPE) strcat(modes, "srpe,");
+		if (r[i].mode_mask & MB_MODE_METH) strcat(modes, "meth,");
+		if (r[i].mode_mask & MB_MODE_HIC)  strcat(modes, "hic,");
+		if (r[i].mode_mask & MB_MODE_LR)   strcat(modes, "lr,");
+		len = strlen(modes);
+		if (len > 0) modes[len-1] = '\0'; /* trim the trailing comma */
+		fprintf(fp, "%-10s %-8s 1/%-8d %12.2f %6d  %s\n",
+			r[i].name,
+			r[i].backend == MB_BACKEND_BWT ? "bwt" : "cp_occ",
+			1 << r[i].sa_bit,
+			(double)r[i].est_ram / (double)(1ULL<<30),
+			r[i].speed_rank,
+			modes);
+	}
+}

@@ -57,6 +57,7 @@ int mb_bwt_save(const char *fn, const mb_bwt_t *bwt);
 mb_bwt_t *mb_bwt_load(const char *fn);
 mb_bwt_t *mb_bwt_load_mmap(const char *fn, int preload);
 mb_bwt_t *mb_bwt_init_from_raw(int is_byte, const void *raw_, uint64_t len, uint64_t primary);
+mb_bwt_t *mb_bwt_init_from_inverted_sa(const uint8_t *a, int64_t len, int64_t primary, int n_thread);
 
 void mb_bwt_cache(mb_bwt_t *bwt, int32_t len);
 uint64_t mb_bwt_rank11(const mb_bwt_t *bwt, uint64_t k, uint8_t c);

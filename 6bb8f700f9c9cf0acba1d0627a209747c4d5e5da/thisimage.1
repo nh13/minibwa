@@ -76,11 +76,7 @@ static void worker_for_se_batch(void *data, long i, int tid)
 		}
 	}
 	assert(p == n);
-<<<<<<<
-	mb_seed_intv_batch(km, idx, n, len, seq, opt->min_len, opt->max_sub_occ, sai);
-=======
 	mb_seed_intv_batch(km, idx->bwt, n, len, seq, opt->min_len, opt->max_sub_occ, opt->min_sub_occ, sai);
->>>>>>>
 	kfree(km, seq);
 	kfree(km, len);
 	kfree(km, buf);
@@ -393,12 +389,15 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
-	{ "meth-tags",    ko_required_argument, 322 },
-	{ "max-sub-occ",  ko_required_argument, 320 }, // ablation: 0 disables Pass-2 sub-SMEM reseeding
-	{ "min-sub-occ",  ko_required_argument, 321 }, // ablation: skip Pass-2 for SMEMs with SA-interval size < N (default 1)
+<<<<<<<
 	{ "index-regime", ko_required_argument, 323 },
 	{ "index-mem",    ko_required_argument, 324 },
 	{ "list-regimes", ko_no_argument,       325 },
+=======
+	{ "meth-tags",    ko_required_argument, 322 },
+	{ "max-sub-occ",  ko_required_argument, 320 }, // ablation: 0 disables Pass-2 sub-SMEM reseeding
+	{ "min-sub-occ",  ko_required_argument, 321 }, // ablation: skip Pass-2 for SMEMs with SA-interval size < N (default 1)
+>>>>>>>
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -638,6 +637,7 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
+<<<<<<<
 		} else if (c == 322) { // --meth-tags
 			int32_t tags = parse_meth_tags(o.arg);
 			if (tags < 0) {
@@ -650,6 +650,7 @@ int main_map(int argc, char *argv[])
 			mo.max_sub_occ = atoi(o.arg);
 		} else if (c == 321) { // --min-sub-occ
 			mo.min_sub_occ = atoi(o.arg);
+=======
 		} else if (c == 323) { // --index-regime
 			// "auto" is the default automatic selection, not a regime name: keep it NULL
 			forced_regime = strcmp(o.arg, "auto") == 0 ? NULL : o.arg;
@@ -657,6 +658,7 @@ int main_map(int argc, char *argv[])
 			index_mem_cap = kom_parse_num(o.arg, 0);
 		} else if (c == 325) { // --list-regimes
 			list_regimes = 1;
+>>>>>>>
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -699,39 +701,25 @@ int main_map(int argc, char *argv[])
 		}
 	}
 	if (mo.flag & MB_F_NO_ALN) mo.flag |= MB_F_NO_PAIRING | MB_F_PAF;
+<<<<<<<
+	// --list-regimes only needs the index prefix; every other mode also needs >=1 read file
+	if (argc - o.ind < (list_regimes? 1 : 2)) {
+		if (hdr_ins.s) free(hdr_ins.s);
+=======
 	if (mo.max_sub_occ > 0 && mo.min_sub_occ > mo.max_sub_occ) {
 		fprintf(stderr, "[ERROR] --min-sub-occ (%d) must not exceed --max-sub-occ (%d)\n", mo.min_sub_occ, mo.max_sub_occ);
 		return 1;
 	}
-	// --list-regimes only needs the index prefix; every other mode also needs >=1 read file
-	if (argc - o.ind < (list_regimes? 1 : 2)) {
-		if (hdr_ins.s) free(hdr_ins.s);
+	if (argc - o.ind < 2)
+>>>>>>>
 		return usage_map(stderr, &mo);
 	}
 
 	is_meth = !!(mo.flag & MB_F_METH);
 	{
 		mb_regime_t rgs[16];
-		/* Pick the mode bit that the regime's mode_mask must satisfy. cp_occ
-		 * regimes advertise MB_MODE_SRPE only, so anything that is not plain
-		 * short-read/paired-end must map to a non-SRPE bit to exclude them
-		 * (native BWT regimes carry all four bits and stay eligible). The
-		 * default "adap" preset sets MB_F_PE|MB_F_ADAP (never MB_F_LONG), so
-		 * the common short-read case correctly stays SRPE. */
-		uint32_t mode;
-		if (is_meth)                        mode = MB_MODE_METH;
-		else if (mo.flag & MB_F_LONG)       mode = MB_MODE_LR;   /* -x lr / --long */
-		/* --hic sets both bits (-5P); require both so plain -5 stays SR/PE and
-		 * keeps the cp_occ regimes eligible (they advertise MB_MODE_SRPE only). */
-		else if ((mo.flag & (MB_F_PRIMARY5|MB_F_NO_PAIRING)) == (MB_F_PRIMARY5|MB_F_NO_PAIRING))
-			mode = MB_MODE_HIC;  /* --hic (-5P) */
-		else                                mode = MB_MODE_SRPE;
-#ifdef MB_HAVE_B2
-		int b2_available = 1;
-#else
-		int b2_available = 0;
-#endif
-		int nrg = mb_regime_discover(argv[o.ind], is_meth, b2_available, rgs, 16);
+		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
+		int nrg = mb_regime_discover(argv[o.ind], is_meth, /*b2_available=*/0, rgs, 16);
 		if (list_regimes) {
 			if (nrg == 0) {
 				fprintf(stderr, "[ERROR] index not found (missing .l2b/.mbw); build one with 'minibwa index'\n");

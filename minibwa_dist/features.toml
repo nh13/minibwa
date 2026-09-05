@@ -54,6 +54,10 @@ name = "index-threads-v2"
 branch = "feat/index-threads-v2"
 required = false
 output = "identical"
+# Static suite: asserts the OpenMP parallelization stays inside mb_bwt_libsais. The
+# byte-identity gate cannot see a same-output slowdown, so a merge that drops the
+# parallelization would pass it silently; this catches that on every sync.
+tests = "test/index-threads"
 summary = "parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe)"
 upstream = { status = "unsubmitted" }
 

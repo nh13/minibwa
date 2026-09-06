@@ -14,6 +14,16 @@ UPSTREAM = "lh3/minibwa"
 BLOCK_BEGIN = "<!-- DISTRO:BEGIN -->"
 BLOCK_END = "<!-- DISTRO:END -->"
 
+# The benchmark CTA is generated OUT OF TREE by the bench harness
+# (minibwa-ab-bench: `python -m cta.bench render`) and committed here as a
+# self-contained artifact. This file consumes it; it never measures anything.
+# Keep `render_cta` in sync with that harness's cta/render_cta.py -- the artifact
+# format below is the contract between them. See CLAUDE.md "The CTA design".
+CTA_ARTEFACT = "minibwa_dist/cta.md"
+CTA_FEATURES_MARKER = "<!-- CTA:FEATURES "
+CTA_DATE_MARKER = "<!-- CTA:MEASURED "
+CTA_MARKER_END = " -->"
+
 BANNER = """\
 > **This is a downstream build of [lh3/minibwa](https://github.com/lh3/minibwa).**
 > It carries changes upstream declined, plus a few not yet offered. Upstream remains the source
@@ -31,6 +41,44 @@ BANNER = """\
 
 def _pr_ref(pr: int | None) -> str:
     return f"[{UPSTREAM}#{pr}](https://github.com/{UPSTREAM}/pull/{pr})" if pr else "—"
+
+
+def render_cta(cta_path: Path | None, manifest: Manifest) -> str:
+    """The benchmark headline for the README front page, or "" / a pending line.
+
+    The artifact records the feature set the numbers were measured against. If
+    that set matches the manifest being built, the numbers are shown; if it
+    drifted (a feature added or removed since), they are hidden behind a
+    one-line "pending re-measurement" note -- the hard-hide rule, so the front
+    page never advertises numbers for a build it no longer describes. A missing
+    artifact (never measured) renders nothing.
+
+    A names-level check: a same-name feature re-cut is not caught here; the
+    measured date in the artifact's caption carries that staleness instead.
+
+    The result is a pure function of (artifact bytes, manifest feature names) --
+    no SHA, date, or clock -- so a nightly re-render is byte-stable and does not
+    trip the sync's no-op detector.
+    """
+    if cta_path is None or not cta_path.exists():
+        return ""
+    measured: set[str] = set()
+    date = "an earlier run"
+    body: list[str] = []
+    for line in cta_path.read_text().splitlines():
+        if line.startswith(CTA_FEATURES_MARKER) and line.endswith(CTA_MARKER_END):
+            names = line[len(CTA_FEATURES_MARKER) : -len(CTA_MARKER_END)]
+            measured = {n.strip() for n in names.split(",") if n.strip()}
+        elif line.startswith(CTA_DATE_MARKER) and line.endswith(CTA_MARKER_END):
+            date = line[len(CTA_DATE_MARKER) : -len(CTA_MARKER_END)].strip()
+        else:
+            body.append(line)
+    if measured and measured == {f.name for f in manifest.features}:
+        return "\n".join(body).strip()
+    return (
+        "> ⚡ **Benchmark numbers are hidden pending re-measurement** — the "
+        f"distribution's feature set has changed since they were last measured ({date})."
+    )
 
 
 def render_feature_table(manifest: Manifest) -> str:
@@ -105,14 +153,20 @@ def render_release_notes(
     return "\n".join(parts)
 
 
-def update_readme(readme: Path, manifest: Manifest) -> None:
+def update_readme(readme: Path, manifest: Manifest, cta_path: Path | None = None) -> None:
     """Insert or refresh the distribution banner and feature table in `readme`.
 
     The block is delimited so repeated renders replace rather than accumulate, and
     upstream's own prose is preserved around it. `dist` is the default branch, so
     this file is the repo's front page -- it must say what this fork is.
+
+    `cta_path`, when given and present, prepends the benchmark headline above the
+    banner (see `render_cta`); when absent or drifted it contributes nothing or a
+    pending line, so the block is always well-formed.
     """
-    block = f"{BLOCK_BEGIN}\n{BANNER}\n{render_feature_table(manifest)}\n{BLOCK_END}"
+    cta = render_cta(cta_path, manifest)
+    cta_part = f"{cta}\n\n" if cta else ""
+    block = f"{BLOCK_BEGIN}\n{cta_part}{BANNER}\n{render_feature_table(manifest)}\n{BLOCK_END}"
     text = readme.read_text() if readme.exists() else ""
 
     begins = text.count(BLOCK_BEGIN)

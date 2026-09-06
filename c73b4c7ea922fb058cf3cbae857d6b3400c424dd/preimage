@@ -313,6 +313,9 @@ int main_gensa(int argc, char *argv[])
 	if (sa_bit < 0 || sa_bit >= 32) { fprintf(stderr, "ERROR: -u must be in [0,32)\n"); return 1; }
 	if (argc - o.ind < 2) return usage_gensa(stderr, sa_bit);
 	bwt = is_raw? mb_bwt_load_raw(argv[o.ind]) : mb_bwt_load(argv[o.ind]);
+	// mb_bwt_load() returns NULL for a missing/unreadable/corrupt BWT; guard before
+	// mb_bwt_gen_sa() dereferences it. (mb_bwt_load_raw has a different contract.)
+	if (bwt == NULL) { fprintf(stderr, "ERROR: failed to load the input BWT file \"%s\"\n", argv[o.ind]); return 1; }
 	mb_bwt_gen_sa(bwt, sa_bit);
 	if (mb_bwt_save(argv[o.ind+1], bwt) != 0) { mb_bwt_destroy(bwt); return 1; } // writer already reported the error
 	mb_bwt_destroy(bwt);
@@ -470,7 +473,7 @@ int main_index(int argc, char *argv[])
 	ketopt_t o = KETOPT_INIT;
 <<<<<<<
 	int c, low_mem = 0, n_thread = 4, is_meth = 0, rc = 0;
-	int sa_bits[8], n_sa_bits = 0;
+	int sa_bits[8] = {4}, n_sa_bits = 0; // sa_bits[0] carries the -u default until a -u arg overrides it; single source for both --help and the build
 =======
 	int c, low_mem = 0, n_thread = 4, sa_bit = 3, is_meth = 0;
 >>>>>>>
@@ -498,7 +501,7 @@ int main_index(int argc, char *argv[])
 				fprintf(stderr, "WARNING: -u accepts at most 8 SA densities; extra values in \"%s\" were ignored\n", o.arg);
 		}
 		else if (c == 's') seed = atol(o.arg);
-		else if (c == 901) return usage_index(stdout, seed, n_sa_bits? sa_bits[0] : 4, n_thread);
+		else if (c == 901) return usage_index(stdout, seed, sa_bits[0], n_thread);
 		else if (c == 902) is_meth = 1;
 	}
 <<<<<<<
@@ -506,7 +509,7 @@ int main_index(int argc, char *argv[])
 	if (n_thread < 1) n_thread = 1;
 	kom_assert(sa_bit >= 0 && sa_bit < 32, "-u must be in [0, 31]");
 =======
-	if (n_sa_bits == 0) { sa_bits[0] = 4; n_sa_bits = 1; } // default when -u is absent
+	if (n_sa_bits == 0) n_sa_bits = 1; // -u absent: keep the default already in sa_bits[0]
 	qsort(sa_bits, n_sa_bits, sizeof(int), cmp_int); // ascending: sa_bits[0] is densest (smallest sa_bit) -> bundled in .mbw
 	if (n_sa_bits > 1 && is_meth) {
 		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with --meth\n");
@@ -590,7 +593,9 @@ int main_index(int argc, char *argv[])
 		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
 		if (bwt == NULL) { bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread); reused = 0; }
 		if (!reused) { // fresh build: densest requested density is bundled into the .mbw
-			mb_bwt_gen_sa(bwt, sa_bits[0]);
+			// mb_bwt_libsais() already returned bwt with its SA sampled at sa_bits[0]
+			// (bwt->sa/sa_bit/n_sa are set there), so no mb_bwt_gen_sa is needed here --
+			// regenerating it would repeat a full large-index pass and allocation.
 			if (mb_bwt_save(fn_bwt, bwt) != 0) { rc = 1; goto cleanup; }
 			if (mb_fp_write(fn_fp, l2b->tot_len, cur_hash) != 0) { rc = 1; goto cleanup; } // record identity; must follow the .mbw save
 		}

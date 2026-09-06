@@ -5,6 +5,7 @@
 #include "kalloc.h"
 #include "kommon.h"
 #include "ksort.h"
+#include "regime.h"
 
 #define key_128x(a) ((a).x)
 KRADIX_SORT_INIT(mb128x, mb128_t, key_128x, 8)
@@ -63,6 +64,46 @@ mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload)
 	idx->is_meth = !!is_meth, idx->l2b = l2b, idx->bwt = bwt;
 end_idx_load_mmap:
 	free(buf);
+	return idx;
+}
+
+/* Load an index for a specific SA regime `rg` (see regime.h). The .l2b is
+ * loaded per `use_mmap` as usual. For the .mbw:
+ *   - bundled SA (rg->sa_path[0]==0): loaded normally via mb_bwt_load[_mmap],
+ *     same as mb_idx_load/mb_idx_load_mmap.
+ *   - sidecar SA (rg->sa_path[0]!=0): `use_mmap` is ignored and the BWT is
+ *     always heap-loaded (mb_bwt_load_nosa), then the sidecar SA is attached
+ *     with mb_bwt_load_sa. This is required because mb_bwt_load_sa refuses
+ *     to attach a heap-allocated SA to an mmap-loaded BWT (mb_bwt_destroy
+ *     only frees bwt->sa when bwt->mmap==0, so mixing the two would either
+ *     leak the sidecar SA or double-free/munmap it); forcing the heap path
+ *     keeps a single, consistent owner for every allocation in `bwt`.
+ * Only MB_BACKEND_BWT is handled; MB_BACKEND_CP_OCC is added in a later PR (M3).
+ * Returns NULL on any failure, freeing anything already allocated. */
+mb_idx_t *mb_idx_load_regime(const char *prefix, const mb_regime_t *rg, int use_mmap, int preload)
+{
+	char *buf;
+	mb_idx_t *idx = 0;
+	l2b_t *l2b;
+	mb_bwt_t *bwt = 0;
+	buf = kom_calloc(char, strlen(prefix) + 16); /* room for ".meth.mbw" */
+	strcat(strcpy(buf, prefix), ".l2b");
+	l2b = use_mmap? l2b_load_mmap(buf, preload) : l2b_load(buf);
+	if (!l2b) { free(buf); return 0; }
+	/* A meth regime loads the converted <prefix>.meth.mbw; a normal one <prefix>.mbw.
+	 * A meth index is always bundled (no sidecars), so it takes the bundled path. */
+	strcat(strcpy(buf, prefix), rg->is_meth? ".meth.mbw" : ".mbw");
+	if (rg->sa_path[0] == 0) { /* bundled SA */
+		bwt = use_mmap? mb_bwt_load_mmap(buf, preload) : mb_bwt_load(buf);
+	} else { /* sidecar SA: force heap-load to preserve the single mmap-owner free invariant */
+		bwt = mb_bwt_load_nosa(buf);
+		if (bwt && mb_bwt_load_sa(bwt, rg->sa_path) != 0) { mb_bwt_destroy(bwt); bwt = 0; }
+	}
+	free(buf);
+	if (!bwt) { l2b_destroy(l2b); return 0; }
+	mb_bwt_cache(bwt, 10); // TODO: don't hard code this
+	idx = kom_calloc(mb_idx_t, 1);
+	idx->l2b = l2b; idx->bwt = bwt; idx->is_meth = rg->is_meth; /* preserve meth selection */
 	return idx;
 }
 

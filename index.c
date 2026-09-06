@@ -1,6 +1,9 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
 #include "libsais.h"
 #include "libsais64.h"
 #include "kommon.h"
@@ -93,7 +96,7 @@ static mb_bwt_t *mb_bwt_libsais(const l2b_t *l2b, int sa_bit, int both_strand, i
 		a64[0] = len;
 	}
 
-	n_ssa = (len + (1<<sa_bit)) >> sa_bit;
+	n_ssa = (len + (1ULL<<sa_bit)) >> sa_bit;
 	ssa = kom_calloc(uint64_t, n_ssa);
 	primary = sa_to_bwt(a, use_int32, seq, len, sa_bit, ssa);
 	assert(primary != -1);
@@ -184,7 +187,7 @@ int main_raw2bwt(int argc, char *argv[])
 		if (strcmp(argv[i], "--help") == 0) return usage_raw2bwt(stdout);
 	if (argc < 3) return usage_raw2bwt(stderr);
 	bwt = mb_bwt_load_raw(argv[1]);
-	mb_bwt_save(argv[2], bwt);
+	if (mb_bwt_save(argv[2], bwt) != 0) { mb_bwt_destroy(bwt); return 1; } // writer already reported the error
 	mb_bwt_destroy(bwt);
 	return 0;
 }
@@ -215,12 +218,14 @@ int main_genbwt(int argc, char *argv[])
 		else if (c == 'u') sa_bit = atoi(o.arg);
 		else if (c == 901) return usage_genbwt(stdout, sa_bit, n_thread);
 	}
+	// -u reaches 1ULL<<sa_bit in mb_bwt_libsais(); reject out-of-range before then (>=32 exceeds any density; >=64 is UB)
+	if (sa_bit < 0 || sa_bit >= 32) { fprintf(stderr, "ERROR: -u must be in [0,32)\n"); return 1; }
 	if (argc - o.ind < 2) return usage_genbwt(stderr, sa_bit, n_thread);
 	l2b = l2b_load(argv[o.ind]);
 	kom_assert(l2b, "failed to open the input file.");
 	bwt = mb_bwt_libsais(l2b, sa_bit, both_strand, 0, n_thread);
 	l2b_destroy(l2b);
-	mb_bwt_save(argv[o.ind+1], bwt);
+	if (mb_bwt_save(argv[o.ind+1], bwt) != 0) { mb_bwt_destroy(bwt); return 1; } // writer already reported the error
 	mb_bwt_destroy(bwt);
 	return 0;
 }
@@ -245,10 +250,15 @@ int main_gensa(int argc, char *argv[])
 		else if (c == 'r') is_raw = 1;
 		else if (c == 901) return usage_gensa(stdout, sa_bit);
 	}
+	// -u reaches 1ULL<<sa_bit in mb_bwt_gen_sa(); reject out-of-range before then (>=32 exceeds any density; >=64 is UB)
+	if (sa_bit < 0 || sa_bit >= 32) { fprintf(stderr, "ERROR: -u must be in [0,32)\n"); return 1; }
 	if (argc - o.ind < 2) return usage_gensa(stderr, sa_bit);
 	bwt = is_raw? mb_bwt_load_raw(argv[o.ind]) : mb_bwt_load(argv[o.ind]);
+	// mb_bwt_load() returns NULL for a missing/unreadable/corrupt BWT; guard before
+	// mb_bwt_gen_sa() dereferences it. (mb_bwt_load_raw has a different contract.)
+	if (bwt == NULL) { fprintf(stderr, "ERROR: failed to load the input BWT file \"%s\"\n", argv[o.ind]); return 1; }
 	mb_bwt_gen_sa(bwt, sa_bit);
-	mb_bwt_save(argv[o.ind+1], bwt);
+	if (mb_bwt_save(argv[o.ind+1], bwt) != 0) { mb_bwt_destroy(bwt); return 1; } // writer already reported the error
 	mb_bwt_destroy(bwt);
 	return 0;
 }
@@ -259,7 +269,7 @@ static int usage_index(FILE *fp, uint64_t seed, int sa_bit, int n_thread)
 	fprintf(fp, "Usage: minibwa index [options] <in.fasta> [out.prefix]\n");
 	fprintf(fp, "Options:\n");
 	fprintf(fp, "  -s INT    random seed for amibiguous bases [%ld]\n", (unsigned long)seed);
-	fprintf(fp, "  -u INT    SA sample rate at 1/(1<<INT) [%d]\n", sa_bit);
+	fprintf(fp, "  -u INT[,INT]  SA sample rate(s) at 1/(1<<INT); a comma list builds several densities, densest bundled [%d]\n", sa_bit);
 	fprintf(fp, "  -l        low-memory GPL'd algorithm for BWT construction\n");
 	fprintf(fp, "  -b NUM    block size (effective with -l) [10m]\n");
 #ifdef LIBSAIS_OPENMP
@@ -270,32 +280,186 @@ static int usage_index(FILE *fp, uint64_t seed, int sa_bit, int n_thread)
 	return fp == stdout? 0 : 1;
 }
 
+// parse a comma-separated list of integers in [0,32) (e.g. "3,4,2") into sa_bits[],
+// capped at max_n values; empty tokens are skipped. Returns the number of values parsed,
+// or -1 on a malformed (non-numeric) or out-of-range token. If `truncated` is non-NULL,
+// it is set to 1 when the list held more than max_n values (the extras were dropped),
+// else 0.
+static int parse_sa_bits(const char *arg, int *sa_bits, int max_n, int *truncated)
+{
+	const char *p = arg;
+	int n = 0;
+	if (truncated) *truncated = 0;
+	while (*p && n < max_n) {
+		char *end;
+		long v;
+		if (*p == ',') { ++p; continue; } // skip empty tokens, e.g. "3,,4"
+		v = strtol(p, &end, 10);
+		if (end == p) return -1; // no digits consumed: malformed token
+		if (v < 0 || v >= 32) return -1; // out of range: 1<<sa_bit would be UB
+		sa_bits[n++] = (int)v;
+		p = end;
+		if (*p == ',') ++p;
+		else if (*p != '\0') return -1; // junk after the number
+	}
+	if (truncated && n == max_n) {
+		while (*p == ',') ++p; // skip trailing/empty separators before checking for real leftovers
+		if (*p != '\0') *truncated = 1;
+	}
+	return n;
+}
+
+static int cmp_int(const void *a, const void *b)
+{
+	return *(const int*)a - *(const int*)b;
+}
+
+// peek the SA density bundled into an existing .mbw (the 4-byte sa_bit field
+// right after the magic, offset 4) without fully loading it. Needed because
+// mb_bwt_load_nosa() deliberately resets bwt->sa_bit to the "no SA attached"
+// sentinel (-1) after reading it, so the bundled density can't be recovered
+// from the returned bwt. Returns 0 on success (with *out set), -1 on any
+// I/O error or magic mismatch.
+static int peek_bundled_sa_bit(const char *fn, uint32_t *out)
+{
+	FILE *fp = fopen(fn, "rb");
+	char magic[4];
+	if (fp == 0) return -1;
+	if (fread(magic, 1, 4, fp) != 4 || strncmp(magic, MB_MAGIC, 4) != 0) { fclose(fp); return -1; }
+	if (fread(out, 4, 1, fp) != 1) { fclose(fp); return -1; }
+	fclose(fp);
+	return 0;
+}
+
+/* --- Reference-fingerprint guard for incremental .mbw reuse ------------------
+ * The non-low-mem index path reuses an existing <prefix>.mbw (skipping the BWT
+ * rebuild) so that a later `-u` run can add SA densities cheaply. But the .l2b
+ * is rewritten from the *current* FASTA every run, so reusing a .mbw built from
+ * a DIFFERENT reference silently pairs a new .l2b with an old BWT -> wrong
+ * mapping coordinates. We guard reuse with a fingerprint of l2b->pac (the exact
+ * bits mb_bwt_libsais() reads to build the BWT), stored beside the .mbw in a
+ * <prefix>.mbw.fp sidecar. Hashing pac (not the raw FASTA) is deliberate: N
+ * bases are resolved with a -s-seeded RNG (l2bit.c:l2b_format_seq), so pac also
+ * changes on a same-FASTA/different-seed rebuild, which must invalidate reuse. */
+#define MB_FP_MAGIC "MFP\1"
+
+// 64-bit content hash of the just-encoded reference (l2b->pac), salted with the
+// total length. Changes iff the BWT that would be built from `l2b` now differs.
+static uint64_t mb_fp_hash_pac(const l2b_t *l2b)
+{
+	uint64_t h = mb_hash64(l2b->tot_len ^ 0x4D42574649443031ULL); // "MBWFID01" salt
+	uint64_t i;
+	for (i = 0; i < l2b->n_pac; ++i)
+		h = mb_hash64(h ^ (l2b->pac[i] + i)); // +i keeps the mix order-sensitive
+	return h;
+}
+
+// Write <fn> = MB_FP_MAGIC(4) + seq_len(8) + hash(8). Plain write with checked
+// returns, matching mb_bwt_save/l2b_save; a torn/short file reads back as a
+// mismatch (below) and forces a rebuild, so no temp+rename is needed. Must be
+// called only after the matching .mbw was saved. Returns 0 on success, -1 else.
+static int mb_fp_write(const char *fn, uint64_t seq_len, uint64_t hash)
+{
+	FILE *fp = fopen(fn, "wb");
+	int ok = 1;
+	if (fp == 0) { fprintf(stderr, "ERROR: cannot open fingerprint sidecar \"%s\" for writing\n", fn); return -1; }
+	ok = ok && fwrite(MB_FP_MAGIC, 1, 4, fp) == 4;
+	ok = ok && fwrite(&seq_len, 8, 1, fp) == 1;
+	ok = ok && fwrite(&hash,    8, 1, fp) == 1;
+	if (fclose(fp) != 0) ok = 0;
+	if (!ok) { fprintf(stderr, "ERROR: failed to write fingerprint sidecar \"%s\" (disk full or write error)\n", fn); return -1; }
+	return 0;
+}
+
+// Returns 1 iff <fn> exists, parses as a valid MFP record, AND both (seq_len,
+// hash) match. Any I/O error, magic mismatch, or short read reads as "no match"
+// (never a false accept), so a missing/corrupt fingerprint conservatively
+// forces a rebuild rather than trusting an unverifiable .mbw.
+static int mb_fp_matches(const char *fn, uint64_t seq_len, uint64_t hash)
+{
+	FILE *fp = fopen(fn, "rb");
+	char magic[4];
+	uint64_t stored_len, stored_hash;
+	int ok;
+	if (fp == 0) return 0;
+	ok = fread(magic, 1, 4, fp) == 4 && strncmp(magic, MB_FP_MAGIC, 4) == 0
+		&& fread(&stored_len, 8, 1, fp) == 1 && fread(&stored_hash, 8, 1, fp) == 1;
+	fclose(fp);
+	return ok && stored_len == seq_len && stored_hash == hash;
+}
+
+// Remove every <prefix>.sa.u<N> sidecar (N in [0,32), the range index accepts).
+// Called only on a detected reference change: those sidecars were built against
+// the old BWT and must not be paired with the rebuilt one. Returns 0 on success;
+// -1 if any sidecar could not be removed (other than not existing) -- the caller
+// must then abort rather than publish a new BWT beside a stale sidecar, which
+// mb_bwt_load_sa would accept by count and attach with wrong SA coordinates.
+static int mb_fp_remove_stale_sidecars(const char *prefix)
+{
+	char *side = kom_calloc(char, strlen(prefix) + 32);
+	int i, rc = 0;
+	for (i = 0; i < 32; ++i) {
+		sprintf(side, "%s.sa.u%d", prefix, i);
+		if (unlink(side) != 0 && errno != ENOENT) {
+			fprintf(stderr, "ERROR: cannot remove stale SA sidecar \"%s\": %s\n", side, strerror(errno));
+			rc = -1;
+		}
+	}
+	free(side);
+	return rc;
+}
+
 int main_index(int argc, char *argv[])
 {
 	ketopt_t o = KETOPT_INIT;
-	int c, low_mem = 0, n_thread = 4, sa_bit = 4, is_meth = 0;
+	int c, low_mem = 0, n_thread = 4, is_meth = 0, rc = 0;
+	int sa_bits[8] = {4}, n_sa_bits = 0; // sa_bits[0] carries the -u default until a -u arg overrides it; single source for both --help and the build
 	int64_t block_size = 10000000;
 	uint64_t seed = 11;
-	char *prefix, *fn_l2b, *fn_bwt, *fn_meth_bwt = 0;
-	l2b_t *l2b;
-	mb_bwt_t *bwt;
+	// fn_l2b/fn_bwt/fn_meth_bwt/fn_fp/l2b/bwt/side are hoisted to function scope (rather
+	// than declared where first assigned) so the single `cleanup:` label below can unwind
+	// whichever of them are live regardless of which branch/save call failed.
+	char *prefix, *fn_l2b = 0, *fn_bwt = 0, *fn_meth_bwt = 0, *fn_fp = 0, *side = 0;
+	l2b_t *l2b = 0;
+	mb_bwt_t *bwt = 0;
 
 	while ((c = ketopt(&o, argc, argv, 1, "ls:u:b:t:", long_opts)) >= 0) {
 		if (c == 't') n_thread = atoi(o.arg);
 		else if (c == 'l') low_mem = 1;
 		else if (c == 'b') block_size = kom_parse_num(o.arg, 0);
-		else if (c == 'u') sa_bit = atoi(o.arg);
+		else if (c == 'u') {
+			int truncated = 0;
+			n_sa_bits = parse_sa_bits(o.arg, sa_bits, 8, &truncated);
+			if (n_sa_bits <= 0) {
+				fprintf(stderr, "ERROR: -u expects a comma-separated list of non-negative integers (e.g. -u 3,4), got \"%s\"\n", o.arg);
+				return 1;
+			}
+			if (truncated)
+				fprintf(stderr, "WARNING: -u accepts at most 8 SA densities; extra values in \"%s\" were ignored\n", o.arg);
+		}
 		else if (c == 's') seed = atol(o.arg);
-		else if (c == 901) return usage_index(stdout, seed, sa_bit, n_thread);
+		else if (c == 901) return usage_index(stdout, seed, sa_bits[0], n_thread);
 		else if (c == 902) is_meth = 1;
 	}
-	if (argc - o.ind == 0) return usage_index(stderr, seed, sa_bit, n_thread);
+	if (n_sa_bits == 0) n_sa_bits = 1; // -u absent: keep the default already in sa_bits[0]
+	qsort(sa_bits, n_sa_bits, sizeof(int), cmp_int); // ascending: sa_bits[0] is densest (smallest sa_bit) -> bundled in .mbw
+	if (n_sa_bits > 1 && is_meth) {
+		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with --meth\n");
+		return 1;
+	}
+	if (low_mem && n_sa_bits > 1) {
+		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with -l\n");
+		return 1;
+	}
+	if (argc - o.ind == 0) return usage_index(stderr, seed, sa_bits[0], n_thread);
 
 	prefix = o.ind + 1 < argc? argv[o.ind+1] : argv[o.ind];
 	fn_l2b = kom_calloc(char, strlen(prefix) + 10);
 	strcat(strcpy(fn_l2b, prefix), ".l2b");
 	fn_bwt = kom_calloc(char, strlen(prefix) + 10);
 	strcat(strcpy(fn_bwt, prefix), ".mbw");
+	fn_fp = kom_calloc(char, strlen(prefix) + 10);
+	strcat(strcpy(fn_fp, prefix), ".mbw.fp");
 	if (is_meth) {
 		fn_meth_bwt = kom_calloc(char, strlen(prefix) + 10);
 		strcat(strcpy(fn_meth_bwt, prefix), ".meth.mbw");
@@ -309,34 +473,95 @@ int main_index(int argc, char *argv[])
 		mb_bwtgen(fn_l2b, fn_bwt, block_size);
 		l2b_save(fn_l2b, l2b);
 		bwt = mb_bwt_load_raw(fn_bwt);
-		mb_bwt_gen_sa(bwt, sa_bit);
-		mb_bwt_save(fn_bwt, bwt);
-		mb_bwt_destroy(bwt);
+		mb_bwt_gen_sa(bwt, sa_bits[0]);
+		if (mb_bwt_save(fn_bwt, bwt) != 0) { rc = 1; goto cleanup; } // writer already reported the error
+		mb_bwt_destroy(bwt); bwt = 0;
+		// -l always rebuilds the .mbw, so pair it with a matching fingerprint and drop any
+		// sidecar SA left by a previous build. Skipping this lets a later (non -l) run see a
+		// stale-but-matching .fp, reuse this .mbw against a fresh .l2b, and mis-coordinate
+		// (l2b->pac is not mutated by the save_pac* calls, so hashing it here is the ref identity).
+		if (mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
+		if (mb_fp_write(fn_fp, l2b->tot_len, mb_fp_hash_pac(l2b)) != 0) { rc = 1; goto cleanup; }
 		if (is_meth) {
 			l2b_save_pac_meth(fn_l2b, l2b, 1);
 			mb_bwtgen(fn_l2b, fn_meth_bwt, block_size);
 			l2b_save(fn_l2b, l2b); // restore the real .l2b; the meth pac above overwrote it (cf. the regular pass)
 			bwt = mb_bwt_load_raw(fn_meth_bwt);
-			mb_bwt_gen_sa(bwt, sa_bit);
-			mb_bwt_save(fn_meth_bwt, bwt);
-			mb_bwt_destroy(bwt);
+			mb_bwt_gen_sa(bwt, sa_bits[0]);
+			if (mb_bwt_save(fn_meth_bwt, bwt) != 0) { rc = 1; goto cleanup; }
+			mb_bwt_destroy(bwt); bwt = 0;
 		}
 #else
 		if (kom_verbose >= 1) fprintf(stderr, "ERROR: option -l not compiled as it depends on GPL'd code\n");
 		abort();
 #endif
 	} else {
-		l2b_save(fn_l2b, l2b);
-		bwt = mb_bwt_libsais(l2b, sa_bit, 1, 0, n_thread);
-		mb_bwt_save(fn_bwt, bwt);
-		mb_bwt_destroy(bwt);
-		if (is_meth) {
-			bwt = mb_bwt_libsais(l2b, sa_bit, 1, 1, n_thread);
-			mb_bwt_save(fn_meth_bwt, bwt);
-			mb_bwt_destroy(bwt);
+		int reused, have_mbw, i;
+		uint32_t bundled_sa_bit = (uint32_t)-1; // valid only when reused is true
+		uint64_t cur_hash;
+		cur_hash = mb_fp_hash_pac(l2b); // l2b is resident; one cheap pass over pac
+		// NB: .l2b is written last (end of this branch), not here, so a mid-rebuild
+		// abort leaves the old .l2b beside the old .mbw rather than a new .l2b
+		// paired with a stale BWT (which map would silently mis-coordinate).
+		// incremental: reuse an existing .mbw ONLY if its fingerprint sidecar proves it
+		// was built from the reference we just encoded. A missing/corrupt/mismatched .fp
+		// forces a full rebuild -- reusing an unverifiable .mbw is exactly the bug this
+		// guards against (a new .l2b silently paired with a stale BWT).
+		have_mbw = (access(fn_bwt, R_OK) == 0);
+		reused = have_mbw && mb_fp_matches(fn_fp, l2b->tot_len, cur_hash);
+		if (have_mbw && !reused)
+			fprintf(stderr, "WARNING: \"%s\" exists but its fingerprint is missing, unreadable, or "
+				"doesn't match the current reference; rebuilding the BWT from scratch\n", fn_bwt);
+		// A fresh build publishes a new BWT, so any pre-existing .sa.u<N> sidecars were
+		// sampled from a previous reference and must not survive beside it. Do this on
+		// EVERY fresh build, not only when a .mbw exists -- a deleted .mbw or a
+		// partially-copied index dir can leave sidecars with no .mbw, and those would
+		// otherwise be attached by mb_bwt_load_sa with wrong SA coordinates (the exact
+		// failure the fingerprint guards against). Abort if one can't be removed, before
+		// the new BWT is published.
+		if (!reused && mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
+		if (reused) peek_bundled_sa_bit(fn_bwt, &bundled_sa_bit); // best-effort; a failure here just disables the dedup below
+		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
+		if (bwt == NULL) {
+			// A matching-fingerprint .mbw that fails to load falls through to a fresh
+			// rebuild, but the pre-load removal above ran only for !reused. Drop stale
+			// sidecars here too before publishing the replacement, or a leftover
+			// .sa.u<N> would be attached to it with wrong SA coordinates.
+			if (reused && mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
+			bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread);
+			reused = 0;
 		}
+		if (!reused) { // fresh build: densest requested density is bundled into the .mbw
+			// mb_bwt_libsais() already returned bwt with its SA sampled at sa_bits[0]
+			// (bwt->sa/sa_bit/n_sa are set there), so no mb_bwt_gen_sa is needed here --
+			// regenerating it would repeat a full large-index pass and allocation.
+			if (mb_bwt_save(fn_bwt, bwt) != 0) { rc = 1; goto cleanup; }
+			if (mb_fp_write(fn_fp, l2b->tot_len, cur_hash) != 0) { rc = 1; goto cleanup; } // record identity; must follow the .mbw save
+		}
+		// on an incremental run the .mbw's bundled density is fixed and left untouched, so every
+		// requested density becomes a sidecar; on a fresh build only sa_bits[1..] do (sa_bits[0] is bundled above)
+		side = kom_calloc(char, strlen(prefix) + 32);
+		for (i = reused? 0 : 1; i < n_sa_bits; ++i) {
+			if (reused && (uint32_t)sa_bits[i] == bundled_sa_bit) continue; // redundant: already bundled in .mbw
+			sprintf(side, "%s.sa.u%d", prefix, sa_bits[i]);
+			mb_bwt_gen_sa(bwt, sa_bits[i]);
+			if (mb_bwt_save_sa(side, bwt) != 0) { rc = 1; goto cleanup; }
+		}
+		free(side); side = 0;
+		mb_bwt_destroy(bwt); bwt = 0;
+		if (is_meth) {
+			bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 1, n_thread);
+			if (mb_bwt_save(fn_meth_bwt, bwt) != 0) { rc = 1; goto cleanup; }
+			mb_bwt_destroy(bwt); bwt = 0;
+		}
+		// Publish the reference layer only now that the .mbw/sidecars/meth writes
+		// have all succeeded (see the note where cur_hash is computed).
+		l2b_save(fn_l2b, l2b);
 	}
-	l2b_destroy(l2b);
-	free(fn_meth_bwt); free(fn_bwt); free(fn_l2b);
-	return 0;
+cleanup:
+	if (bwt) mb_bwt_destroy(bwt);
+	free(side);
+	if (l2b) l2b_destroy(l2b);
+	free(fn_meth_bwt); free(fn_bwt); free(fn_fp); free(fn_l2b);
+	return rc;
 }

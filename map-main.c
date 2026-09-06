@@ -10,6 +10,7 @@
 #include "kthread.h"
 #include "ketopt.h"
 #include "kseq.h"
+#include "regime.h"
 KSTREAM_INIT(gzFile, gzread, 0x10000)
 
 typedef struct {
@@ -346,6 +347,9 @@ static ko_longopt_t long_options[] = {
 	{ "mmap",         ko_optional_argument, 313 },
 	{ "xa-ratio",     ko_required_argument, 314 },
 	{ "outs",         ko_required_argument, 315 },
+	{ "index-regime", ko_required_argument, 323 },
+	{ "index-mem",    ko_required_argument, 324 },
+	{ "list-regimes", ko_no_argument,       325 },
 	{ "dbg-aln-seq",  ko_no_argument,       601 },
 	{ "dbg-anchor",   ko_no_argument,       602 },
 	{ "dbg-seed",     ko_no_argument,       603 },
@@ -403,6 +407,9 @@ static int usage_map(FILE *fp, const mb_opt_t *opt)
 	fprintf(fp, "    -5               take the alignment with the smallest query position as primary\n");
 	fprintf(fp, "    -K NUM1[,NUM2]   process NUM1-NUM2 bp of query sequences in a batch [100m,1g]\n");
 	fprintf(fp, "    --mmap[=lite]    load the index via memory mapped files (slower mapping) []\n");
+	fprintf(fp, "    --index-regime=STR  force a specific on-disk SA regime (e.g. sa8, sa16) []\n");
+	fprintf(fp, "    --index-mem=NUM  cap the memory budget used to auto-select an SA regime []\n");
+	fprintf(fp, "    --list-regimes   list the SA regimes available in <in.idx> and exit\n");
 	fprintf(fp, "    --version        print version number\n");
 	fprintf(fp, "    --help           print this help message\n");
 	return fp == stdout? 0 : 1;
@@ -439,6 +446,9 @@ int main_map(int argc, char *argv[])
 	mb_idx_t *idx;
 	mb_opt_t mo;
 	char *fn_out = 0, *rg_line = 0, *s;
+	const char *forced_regime = 0;
+	uint64_t index_mem_cap = 0;
+	int list_regimes = 0;
 	ketopt_t o = KETOPT_INIT;
 	kstring_t hdr_ins = {0,0,0}, hdr = {0,0,0};
 
@@ -512,6 +522,13 @@ int main_map(int argc, char *argv[])
 			if (o.arg != 0 && strcmp(o.arg, "lite") == 0) mmap_preload = 0;
 		} else if (c == 314 || c == 315) { // --outs or --xa-ratio
 			mo.out_s = atof(o.arg);
+		} else if (c == 323) { // --index-regime
+			// "auto" is the default automatic selection, not a regime name: keep it NULL
+			forced_regime = strcmp(o.arg, "auto") == 0 ? NULL : o.arg;
+		} else if (c == 324) { // --index-mem
+			index_mem_cap = kom_parse_num(o.arg, 0);
+		} else if (c == 325) { // --list-regimes
+			list_regimes = 1;
 		} else if (c == 601) { // --dbg-aln-seq
 			kom_dbg_flag |= MB_DBG_ALN_SEQ;
 		} else if (c == 602) { // --dbg-anchor
@@ -545,18 +562,61 @@ int main_map(int argc, char *argv[])
 				fprintf(stderr, "[WARNING]\033[1;31m -b only takes 'cs', 'ds' or 'MD'. Invalid values are assumed to be 'cs'.\033[0m\n");
 			}
 		} else if (c == 901) { // --version
+			if (hdr_ins.s) free(hdr_ins.s);
 			puts(MB_VERSION);
 			exit(0);
 		} else if (c == 902) { // --help
+			if (hdr_ins.s) free(hdr_ins.s);
 			return usage_map(stdout, &mo);
 		}
 	}
 	if (mo.flag & MB_F_NO_ALN) mo.flag |= MB_F_NO_PAIRING | MB_F_PAF;
-	if (argc - o.ind < 2)
+	// --list-regimes only needs the index prefix; every other mode also needs >=1 read file
+	if (argc - o.ind < (list_regimes? 1 : 2)) {
+		if (hdr_ins.s) free(hdr_ins.s);
 		return usage_map(stderr, &mo);
+	}
 
 	is_meth = !!(mo.flag & MB_F_METH);
-	idx = use_mmap? mb_idx_load_mmap(argv[o.ind], is_meth, mmap_preload) : mb_idx_load(argv[o.ind], is_meth);
+	{
+		mb_regime_t rgs[16];
+		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
+		int nrg = mb_regime_discover(argv[o.ind], is_meth, /*b2_available=*/0, rgs, 16);
+		if (list_regimes) {
+			if (nrg == 0) {
+				fprintf(stderr, "[ERROR] index not found (missing .l2b/.mbw); build one with 'minibwa index'\n");
+				if (hdr_ins.s) free(hdr_ins.s);
+				return 1;
+			}
+			mb_regime_list_print(stdout, rgs, nrg);
+			if (hdr_ins.s) free(hdr_ins.s);
+			return 0;
+		}
+		kom_assert(nrg > 0, "index not found (missing .l2b/.mbw); build one with 'minibwa index'");
+		/* Always compute the real budget. mb_regime_pick applies it correctly per
+		 * regime under --mmap: a bundled regime is demand-paged (budget-exempt),
+		 * but a sidecar regime heap-loads its SA even under mmap and stays gated,
+		 * so auto-select can't pick a dense sidecar under --mmap and OOM. */
+		uint64_t budget = mb_mem_budget(index_mem_cap);
+		int pick = mb_regime_pick(rgs, nrg, budget, mode, use_mmap, forced_regime);
+		if (pick < 0 && forced_regime) {
+			fprintf(stderr, "[ERROR] unknown or unavailable index regime '%s' (see 'minibwa map --list-regimes <idx>' for available regimes)\n", forced_regime);
+			if (hdr_ins.s) free(hdr_ins.s);
+			return 1;
+		}
+		/* mb_regime_pick returns -1 when a real memory budget is set and no regime
+		 * fits it -- a user/config condition, not a bug, so report it cleanly
+		 * rather than aborting through kom_assert. */
+		if (pick < 0) {
+			fprintf(stderr, "[ERROR] no index regime fits the memory budget (try --index-mem, --mmap, or build a sparser -u)\n");
+			if (hdr_ins.s) free(hdr_ins.s);
+			return 1;
+		}
+		if (kom_verbose >= 3)
+			fprintf(stderr, "[M::regime] selected '%s' (est %.1f GB; budget %.1f GB)\n",
+			        rgs[pick].name, rgs[pick].est_ram/1e9, budget/1e9);
+		idx = mb_idx_load_regime(argv[o.ind], &rgs[pick], use_mmap, mmap_preload);
+	}
 	kom_assert(idx, "failed to load the index.");
 	if (kom_verbose >= 3)
 		fprintf(stderr, "[M::%s::%.3f*%.2f] index loaded\n", __func__, kom_realtime(), kom_percent_cpu());

@@ -4,7 +4,7 @@ CPPFLAGS=
 LDFLAGS=
 INCLUDES=
 LOBJS=		kommon.o kalloc.o bwt.o l2bit.o options.o seed.o map-algo.o lchain.o align.o pe.o cs.o format.o \
-			ksw2_extz2_sse.o ksw2_extd2_sse.o ksw2_ll_sse.o
+			ksw2_extz2_sse.o ksw2_extd2_sse.o ksw2_ll_sse.o regime.o
 AOBJS=		kthread.o libsais.o libsais64.o index.o bseq.o map-main.o fastmap.o
 MALLOC_O=	mimalloc.o
 PROG=		minibwa

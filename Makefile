@@ -38,6 +38,107 @@ ifeq ($(ARCH), x86_64)
 	override CFLAGS+=-msse4.2 -mpopcnt
 endif
 
+# ===================== B2: compile-optional cp_occ seeding backend =========
+# `make B2=1` links b2idx.o (minibwa's seeding leaves re-expressed over
+# bwa-mem2/bwa-mem3's cp_occ FM-index) against a pre-built bwa-mem3 libbwa.a.
+# b2idx.cpp is C++ (FMI_search is C++) and MUST be compiled with the same ISA
+# shim macros / include path bwa-mem3 used to build libbwa.a or the FMI_search
+# struct ABI mismatches. Override BWAMEM3_DIR to point at that checkout.
+#
+# Without B2=1: no b2idx.o, no libbwa.a link, no MB_HAVE_B2 -- native build is
+# byte-for-byte the same command line as before this guard existed.
+LINK       = $(CC)
+LINK_FLAGS = $(CFLAGS)
+B2OBJS     =
+B3_LDLIBS  =
+ifeq ($(B2),1)
+	override CPPFLAGS += -DMB_HAVE_B2
+	CXX ?= c++
+	BWAMEM3_DIR ?= ../bwa-mem3/main
+# Fail fast with a clear message rather than an obscure -I / missing-libbwa.a
+# error deep in the build. Only evaluated under B2=1, so a stock `make` is
+# unaffected. Flush-left: a leading tab would make `$(error)` a recipe line.
+ifeq (,$(wildcard $(BWAMEM3_DIR)/libbwa.a))
+$(error B2=1 needs a pre-built bwa-mem3: no libbwa.a under BWAMEM3_DIR ($(BWAMEM3_DIR)); set BWAMEM3_DIR to a checkout containing libbwa.a)
+endif
+	# Phase-2 reference reconstruction: l2bit.c's l2b_from_bns (built via the
+	# generic .c.o rule, not the b2idx.o-specific one below) needs bwa-mem3's
+	# bntseq.h directly under MB_HAVE_B2, so extend INCLUDES for every .c
+	# compile in a B2 build. Harmless for TUs that don't include it.
+	override INCLUDES += -I$(BWAMEM3_DIR)/src
+	UNAME_S := $(shell uname -s)
+	ifneq (,$(filter arm64 aarch64,$(ARCH)))
+		B3_ARCH_FLAGS = -DAPPLE_SILICON=1 -DCACHE_LINE_BYTES=128 \
+		                -D__SSE__=1 -D__SSE2__=1 -D__SSE3__=1 -D__SSSE3__=1 \
+		                -D__SSE4_1__=1 -D__SSE4_2__=1 -I$(BWAMEM3_DIR)/ext/sse2neon
+	else
+		B3_ARCH_FLAGS =
+	endif
+	# libbwa.a's FMI_search.o references libsais_build_fm_index(), which in
+	# turn needs libsais{,64}_gsa_omp -- present in bwa-mem3's own libsais.o /
+	# libsais64.o but NOT baked into libbwa.a itself, so link them explicitly.
+	B3_LIBSAIS = $(BWAMEM3_DIR)/ext/libsais/src/libsais.o $(BWAMEM3_DIR)/ext/libsais/src/libsais64.o
+	ifeq ($(UNAME_S),Darwin)
+		LIBDEFLATE_PREFIX := $(shell brew --prefix libdeflate 2>/dev/null)
+		ifneq (,$(wildcard /opt/homebrew/opt/libomp/lib/libomp.dylib))
+			B3_OMP = -L/opt/homebrew/opt/libomp/lib -lomp
+		else
+			B3_OMP = -lomp
+		endif
+		B3_FRAMEWORKS = -framework Accelerate
+		B3_EXTRA = -L$(LIBDEFLATE_PREFIX)/lib -ldeflate
+	else
+		B3_OMP = -fopenmp
+		B3_FRAMEWORKS =
+		B3_EXTRA = -ldeflate
+		ifneq (,$(wildcard /usr/local/lib64/libdeflate.*))
+			B3_EXTRA += -L/usr/local/lib64
+		endif
+	endif
+	# zlib-ng: src/fast_reader.c's plain-gzip decode path is a direct (zng_*)
+	# dependency of libbwa.a as of the combined B1+B2 bwa-mem3 -- the older
+	# bwa-mem3 checkout the b2idx prototype was validated against predates
+	# this, so it isn't in the prototype's Makefile. Use the vendored static
+	# archive bwa-mem3 itself builds (ext/zlib-ng/build/libz-ng.a).
+	B3_ZLIBNG = $(BWAMEM3_DIR)/ext/zlib-ng/build/libz-ng.a
+	B3_LDLIBS = $(BWAMEM3_DIR)/libbwa.a $(BWAMEM3_DIR)/ext/htslib/libhts.a $(B3_LIBSAIS) \
+	            $(B3_ZLIBNG) $(B3_OMP) $(B3_FRAMEWORKS) $(B3_EXTRA)
+	B2OBJS = b2idx.o
+	LINK       = $(CXX)
+	# Intentionally empty (native builds use LINK_FLAGS = $(CFLAGS)): under B2=1
+	# the CFLAGS bits that matter at link are carried elsewhere -- any -fsanitize
+	# rides in via $(LDFLAGS), and OpenMP/arch libs via $(B3_LDLIBS)/$(B3_OMP) --
+	# so folding $(CFLAGS) in here would only re-add compile-only flags (and could
+	# duplicate -fopenmp against the C++ linker). See the link recipe below.
+	LINK_FLAGS =
+	# bwa-mem3's libbwa.a pulls in its own libsais (needs the gsa_omp variant
+	# above); linking minibwa's libsais.o/libsais64.o too would duplicate
+	# symbols, so drop them from AOBJS. (`map` never builds an index, so this
+	# only affects the unused `index` subcommand under a B2 build.)
+	AOBJS := $(filter-out libsais.o libsais64.o,$(AOBJS))
+endif
+# ===========================================================================
+
+# ===================== build-mode guard =====================================
+# LOBJS/AOBJS/main.o are compiled with $(CPPFLAGS), which gains -DMB_HAVE_B2
+# only under B2=1. The object names do not encode that flag, so toggling
+# `make` <-> `make B2=1` without `make clean` would reuse stale objects and
+# silently drop the cp_occ backend (the binary still links and runs, just with
+# no sa*-b2 regime). Record the current mode in a stamp file, rewritten only
+# when the mode actually changes; every $(CPPFLAGS) object depends on it, so a
+# mode flip refreshes the stamp's mtime and forces those objects to recompile.
+# force_build_mode is the first target rule in the file; without an explicit
+# default goal, GNU make would otherwise silently adopt it as the thing a
+# bare `make`/`make B2=1` builds instead of `all`.
+.DEFAULT_GOAL := all
+BUILD_MODE := $(if $(filter 1,$(B2)),b2,native)
+.PHONY: force_build_mode
+force_build_mode:
+.build-mode: force_build_mode
+	@[ "$$(cat $@ 2>/dev/null)" = "$(BUILD_MODE)" ] || echo "$(BUILD_MODE)" > $@
+$(LOBJS) $(AOBJS) main.o: .build-mode
+# ===========================================================================
+
 .SUFFIXES:.c .o
 .PHONY:all clean depend
 
@@ -46,17 +147,23 @@ endif
 
 all:$(PROG)
 
+b2idx.o:b2idx.cpp b2idx.h bwt.h kalloc.h $(BWAMEM3_DIR)/src/fmi_seed_api.h $(BWAMEM3_DIR)/src/bntseq.h
+		$(CXX) -c -std=c++14 -O3 -g -Wall $(B3_ARCH_FLAGS) -I$(BWAMEM3_DIR)/src -I. $< -o $@
+
 mimalloc.o:
 		$(CC) -c -std=gnu11 -O3 -Wall -Wextra -DNDEBUG -DMI_MALLOC_OVERRIDE -DMI_OSX_INTERPOSE=1 -DMI_OSX_ZONE=1 -Imimalloc mimalloc/static.c -o $@
 
 libminibwa.a:$(LOBJS)
 		$(AR) -csru $@ $(LOBJS)
 
-minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) main.o
-		$(CC) $(CFLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) main.o -o $@ -L. -lminibwa $(LIBS)
+minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o
+		# $(LIBS) (-lz ...) MUST follow $(B3_LDLIBS): static libhts.a in there needs zlib
+		# resolved after it, or the B2 link fails on undefined zlib symbols. Native builds
+		# have an empty $(B3_LDLIBS), so this is just $(LIBS) at the end as before.
+		$(LINK) $(LINK_FLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o -o $@ -L. -lminibwa $(B3_LDLIBS) $(LIBS)
 
 clean:
-		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM
+		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM .build-mode
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CFLAGS) $(DFLAGS) -- *.c *.cpp)

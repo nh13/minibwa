@@ -73,7 +73,7 @@ static void worker_for_se_batch(void *data, long i, int tid)
 		}
 	}
 	assert(p == n);
-	mb_seed_intv_batch(km, idx->bwt, n, len, seq, opt->min_len, opt->max_sub_occ, sai);
+	mb_seed_intv_batch(km, idx, n, len, seq, opt->min_len, opt->max_sub_occ, sai);
 	kfree(km, seq);
 	kfree(km, len);
 	kfree(km, buf);
@@ -580,8 +580,26 @@ int main_map(int argc, char *argv[])
 	is_meth = !!(mo.flag & MB_F_METH);
 	{
 		mb_regime_t rgs[16];
-		uint32_t mode = is_meth? MB_MODE_METH : MB_MODE_SRPE;  /* refine for hic/lr as needed */
-		int nrg = mb_regime_discover(argv[o.ind], is_meth, /*b2_available=*/0, rgs, 16);
+		/* Pick the mode bit that the regime's mode_mask must satisfy. cp_occ
+		 * regimes advertise MB_MODE_SRPE only, so anything that is not plain
+		 * short-read/paired-end must map to a non-SRPE bit to exclude them
+		 * (native BWT regimes carry all four bits and stay eligible). The
+		 * default "adap" preset sets MB_F_PE|MB_F_ADAP (never MB_F_LONG), so
+		 * the common short-read case correctly stays SRPE. */
+		uint32_t mode;
+		if (is_meth)                        mode = MB_MODE_METH;
+		else if (mo.flag & MB_F_LONG)       mode = MB_MODE_LR;   /* -x lr / --long */
+		/* --hic sets both bits (-5P); require both so plain -5 stays SR/PE and
+		 * keeps the cp_occ regimes eligible (they advertise MB_MODE_SRPE only). */
+		else if ((mo.flag & (MB_F_PRIMARY5|MB_F_NO_PAIRING)) == (MB_F_PRIMARY5|MB_F_NO_PAIRING))
+			mode = MB_MODE_HIC;  /* --hic (-5P) */
+		else                                mode = MB_MODE_SRPE;
+#ifdef MB_HAVE_B2
+		int b2_available = 1;
+#else
+		int b2_available = 0;
+#endif
+		int nrg = mb_regime_discover(argv[o.ind], is_meth, b2_available, rgs, 16);
 		if (list_regimes) {
 			if (nrg == 0) {
 				fprintf(stderr, "[ERROR] index not found (missing .l2b/.mbw); build one with 'minibwa index'\n");

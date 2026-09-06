@@ -6,6 +6,9 @@
 #include "kommon.h"
 #include "ksort.h"
 #include "regime.h"
+#ifdef MB_HAVE_B2
+#include "b2idx.h"
+#endif
 
 #define key_128x(a) ((a).x)
 KRADIX_SORT_INIT(mb128x, mb128_t, key_128x, 8)
@@ -67,6 +70,48 @@ end_idx_load_mmap:
 	return idx;
 }
 
+#ifdef MB_HAVE_B2
+/* Load an index backed by the bwa-mem2/bwa-mem3 cp_occ FM-index (b2idx.cpp)
+ * instead of minibwa's native BWT. idx->bwt is left NULL (see seed.c's
+ * idx->b2 dispatch) and idx->b2 holds the opaque cp_occ handle. is_meth is
+ * not yet supported on this backend (SR/PE only).
+ *
+ * Reference layer (idx->l2b): prefer minibwa's own <prefix>.l2b when it is
+ * present -- loading it is a cheap slurp (~1s on hg38). Only when it is absent
+ * fall back to Phase-2 reconstruction, rebuilding the reference in memory from
+ * the bwa-mem3 index's own layer (<prefix>.pac/.amb/.ann, via mb_b2_load_bns +
+ * l2b_from_bns). Reconstruction is byte-identical to the real .l2b (task-4
+ * test/report) but loops over the entire 2N packed reference, which costs ~8.5s
+ * on hg38 -- so it is worth avoiding whenever the .l2b already exists (the
+ * common case: bwa-mem2/3 indexes are usually built alongside minibwa's). The
+ * fallback keeps the cp_occ backend fully functional with no .l2b at all
+ * ("reference purity"). Downstream mapping only ever sees idx->l2b.
+ * Returns NULL on any failure, freeing anything already allocated. */
+static mb_idx_t *mb_idx_load_b2(const char *prefix, int32_t is_meth)
+{
+	mb_idx_t *idx = 0;
+	void *b2, *bns;
+	uint8_t *pac;
+	int64_t l_pac;
+	l2b_t *l2b;
+	char fn_l2b[1024];
+	if (is_meth) return 0; /* not supported by the cp_occ backend yet */
+	b2 = mb_b2_load(prefix);
+	if (!b2) return 0;
+	snprintf(fn_l2b, sizeof fn_l2b, "%s.l2b", prefix);
+	l2b = l2b_load(fn_l2b); /* fast path: co-located .l2b present */
+	if (!l2b) { /* .l2b absent -> Phase-2 reconstruction from the cp_occ index's bns/pac */
+		if (mb_b2_load_bns(prefix, &bns, &pac, &l_pac) != 0) { mb_b2_destroy(b2); return 0; }
+		l2b = l2b_from_bns(bns, pac, l_pac);
+		mb_b2_free_bns(bns, pac); /* l2b_from_bns deep-copies; bns/pac not needed anymore */
+		if (!l2b) { mb_b2_destroy(b2); return 0; }
+	}
+	idx = kom_calloc(mb_idx_t, 1);
+	idx->l2b = l2b; idx->b2 = b2; idx->bwt = 0; idx->is_meth = 0;
+	return idx;
+}
+#endif
+
 /* Load an index for a specific SA regime `rg` (see regime.h). The .l2b is
  * loaded per `use_mmap` as usual. For the .mbw:
  *   - bundled SA (rg->sa_path[0]==0): loaded normally via mb_bwt_load[_mmap],
@@ -78,7 +123,9 @@ end_idx_load_mmap:
  *     only frees bwt->sa when bwt->mmap==0, so mixing the two would either
  *     leak the sidecar SA or double-free/munmap it); forcing the heap path
  *     keeps a single, consistent owner for every allocation in `bwt`.
- * Only MB_BACKEND_BWT is handled; MB_BACKEND_CP_OCC is added in a later PR (M3).
+ * MB_BACKEND_CP_OCC regimes route to mb_idx_load_b2 (compile-optional,
+ * requires MB_HAVE_B2); without it, a cp_occ regime never reaches here
+ * because mb_regime_discover never offers one.
  * Returns NULL on any failure, freeing anything already allocated. */
 mb_idx_t *mb_idx_load_regime(const char *prefix, const mb_regime_t *rg, int use_mmap, int preload)
 {
@@ -86,6 +133,13 @@ mb_idx_t *mb_idx_load_regime(const char *prefix, const mb_regime_t *rg, int use_
 	mb_idx_t *idx = 0;
 	l2b_t *l2b;
 	mb_bwt_t *bwt = 0;
+	if (rg->backend == MB_BACKEND_CP_OCC) {
+#ifdef MB_HAVE_B2
+		return mb_idx_load_b2(prefix, /*is_meth=*/0);
+#else
+		return 0; /* unreachable: discovery never offers cp_occ without MB_HAVE_B2 */
+#endif
+	}
 	buf = kom_calloc(char, strlen(prefix) + 16); /* room for ".meth.mbw" */
 	strcat(strcpy(buf, prefix), ".l2b");
 	l2b = use_mmap? l2b_load_mmap(buf, preload) : l2b_load(buf);
@@ -111,6 +165,9 @@ void mb_idx_destroy(mb_idx_t *idx)
 {
 	if (idx == 0) return;
 	mb_bwt_destroy(idx->bwt);
+#ifdef MB_HAVE_B2
+	if (idx->b2) mb_b2_destroy(idx->b2);
+#endif
 	l2b_destroy(idx->l2b);
 	free(idx);
 }
@@ -726,7 +783,7 @@ mb_hit_t *mb_map(const mb_opt_t *opt, const mb_idx_t *idx, int32_t qlen, const c
 		seq[i] = kom_nt4_table[(uint8_t)seq0[i]];
 	if (mt != L2B_METH_NONE)
 		l2b_meth_convert(mt, qlen, seq);
-	mb_seed_intv(b->km, idx->bwt, qlen, seq, opt->min_len, opt->max_sub_occ, &u);
+	mb_seed_intv(b->km, idx, qlen, seq, opt->min_len, opt->max_sub_occ, &u);
 	kfree(b->km, seq);
 	ret = mb_map_sai(&opt_adap, idx, qlen, seq0, mt, &u, n_hit_, b, qname);
 	if (b0 == 0) mb_tbuf_destroy(b);
@@ -771,7 +828,7 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 
 			// batch SMEM for sub-batch
 			memset(sai, 0, sb_n * sizeof(mb_sai_v));
-			mb_seed_intv_batch(km, idx->bwt, sb_n, &qlen[sb_st], seq4, opt->min_len, opt->max_sub_occ, sai);
+			mb_seed_intv_batch(km, idx, sb_n, &qlen[sb_st], seq4, opt->min_len, opt->max_sub_occ, sai);
 			for (k = 0; k < sb_n; ++k) kfree(km, seq4[k]);
 
 			// map each sequence in sub-batch

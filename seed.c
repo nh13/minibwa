@@ -4,6 +4,26 @@
 #include "mbpriv.h"
 #include "kalloc.h"
 #include "ksort.h"
+#ifdef MB_HAVE_B2
+#include "b2idx.h"
+#endif
+
+/* Dispatch the FM-index SMEM-batch leaf to the native (mb_bwt_*) or the b2
+ * cp_occ (mb_b2_*) backend depending on which index this mb_idx_t carries.
+ * Without MB_HAVE_B2 the b2 backend isn't compiled in, so idx->b2 is always
+ * NULL (nothing sets it) and this always routes to the native path. */
+#ifdef MB_HAVE_B2
+static inline void mb_smem_batch_dispatch(void *km, const mb_idx_t *idx, int32_t n, mb_smem_entry_t *s)
+{
+	if (idx->b2) mb_b2_smem_batch(km, idx->b2, n, s);
+	else mb_bwt_smem_batch(km, idx->bwt, n, s);
+}
+#else
+static inline void mb_smem_batch_dispatch(void *km, const mb_idx_t *idx, int32_t n, mb_smem_entry_t *s)
+{
+	mb_bwt_smem_batch(km, idx->bwt, n, s);
+}
+#endif
 
 #define key_sai0(a) ((a).x[0])
 KRADIX_SORT_INIT(mb_sai0, mb_sai_t, key_sai0, 8)
@@ -21,11 +41,18 @@ KRADIX_SORT_INIT(mb_anchor, mb_anchor_t, key_anchor, 8)
  * Seeding *
  ***********/
 
-void mb_seed_intv(void *km, const mb_bwt_t *bwt, int32_t len, const uint8_t *seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v)
+void mb_seed_intv(void *km, const mb_idx_t *idx, int32_t len, const uint8_t *seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v)
 {
+	const mb_bwt_t *bwt = idx->bwt;
 	int64_t x = 0, i, n_a0;
 	mb_sai_t p;
 
+	if (idx->b2) { // the b2 backend has no scalar SMEM; route through the batch path with n=1
+		int32_t len1 = len;
+		const uint8_t *seq1 = seq;
+		mb_seed_intv_batch(km, idx, 1, &len1, (uint8_t *const*)&seq1, min_len, max_sub_occ, v);
+		return;
+	}
 	v->n = 0;
 	do { // pass 1: standard SMEMs
 		x = mb_bwt_smem(bwt, len, seq, x, min_len, 1, &p);
@@ -53,7 +80,7 @@ void mb_seed_intv(void *km, const mb_bwt_t *bwt, int32_t len, const uint8_t *seq
 	}
 }
 
-void mb_seed_intv_batch(void *km, const mb_bwt_t *bwt, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v)
+void mb_seed_intv_batch(void *km, const mb_idx_t *idx, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v)
 { // identical to mb_seed_intv() though the order of intervals is often different
 	const int max_batch_size = 50;
 	mb_smem_entry_t *s;
@@ -73,7 +100,7 @@ void mb_seed_intv_batch(void *km, const mb_bwt_t *bwt, int32_t n_seq, const int3
 			t->q = seq[j];
 			t->v = &v[j];
 		}
-		mb_bwt_smem_batch(km, bwt, en - i, s);
+		mb_smem_batch_dispatch(km, idx, en - i, s);
 	}
 
 	// second pass; sub-SMEMs
@@ -91,13 +118,13 @@ void mb_seed_intv_batch(void *km, const mb_bwt_t *bwt, int32_t n_seq, const int3
 			t->q = seq[i];
 			t->v = &v[i];
 			if (n_s == max_batch_size) {
-				mb_bwt_smem_batch(km, bwt, n_s, s);
+				mb_smem_batch_dispatch(km, idx, n_s, s);
 				n_s = 0;
 			}
 		}
 	}
 	if (n_s > 0)
-		mb_bwt_smem_batch(km, bwt, n_s, s);
+		mb_smem_batch_dispatch(km, idx, n_s, s);
 	kfree(km, nv);
 	kfree(km, s);
 }
@@ -177,7 +204,12 @@ static void process_batch(void *km, const mb_idx_t *idx, const anchor_aux_t *aux
 {
 	int64_t j, k;
 	for (k = 0; k < m; ++k) a[k] = b[k].a;
+#ifdef MB_HAVE_B2
+	if (idx->b2) mb_b2_sa_batch(km, idx->b2, m, a);
+	else mb_bwt_sa_batch(km, idx->bwt, m, a);
+#else
 	mb_bwt_sa_batch(km, idx->bwt, m, a);
+#endif
 	for (k = 0; k < m; ++k) {
 		const anchor_aux_t *p = &aux[b[k].i];
 		for (j = p->st; j < p->en; ++j) {

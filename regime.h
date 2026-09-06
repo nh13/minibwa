@@ -14,8 +14,9 @@ extern "C" {
  * mb_idx_t from minibwa.h, which they already include. */
 struct mb_idx_s;
 
-/* Which SA-lookup backend a regime uses. cp_occ is a later PR (M3); M2 only
- * ever discovers MB_BACKEND_BWT regimes. */
+/* Which SA-lookup backend a regime uses: minibwa's native classic-BWT (bwt.c)
+ * or bwa-mem2/bwa-mem3's checkpointed cp_occ FM-index (b2idx.cpp; compile-
+ * optional, requires MB_HAVE_B2). */
 typedef enum { MB_BACKEND_BWT, MB_BACKEND_CP_OCC } mb_backend_t;
 
 typedef struct {
@@ -39,8 +40,9 @@ typedef struct {
  * `<prefix>.sa.u*` sidecars; for a methylated index (is_meth!=0) it is
  * `<prefix>.l2b` and `<prefix>.meth.mbw` (a single bundled regime, no sidecars).
  * Writes up to `max` regimes into `out` and returns the count (0 if the base
- * index files are missing). `b2_available` is accepted for forward compatibility
- * with M3's cp_occ regimes; M2 always discovers zero of them. */
+ * index files are missing). When `b2_available` and a co-located bwa-mem3
+ * cp_occ index is present, also discovers one MB_BACKEND_CP_OCC regime for it
+ * (compile-optional: requires MB_HAVE_B2). */
 int mb_regime_discover(const char *prefix, int is_meth, int b2_available, mb_regime_t *out, int max);
 
 /* Detect the usable memory budget: min(host available, cgroup limit,

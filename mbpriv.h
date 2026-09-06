@@ -76,7 +76,8 @@ typedef struct {
 struct mb_idx_s {
 	int32_t is_meth;
 	l2b_t *l2b;
-	mb_bwt_t *bwt;
+	mb_bwt_t *bwt;    // native minibwa FM-index (stock seeding); NULL in b2 mode
+	void *b2;         // bwa-mem2/bwa-mem3 cp_occ FM-index seeding backend; NULL for stock
 };
 
 typedef struct {
@@ -108,9 +109,10 @@ void mb_opt_adap(const mb_opt_t *opt0, int32_t len, mb_opt_t *opt);
 // defined in bwtgen.c
 void mb_bwtgen(const char *fn_pac, const char *fn_bwt, int block_size);
 
-// defined in seed.c
-void mb_seed_intv(void *km, const mb_bwt_t *bwt, int32_t len, const uint8_t *seq, int32_t min_len, int32_t max_sub_occ, int32_t min_sub_occ, mb_sai_v *v);
-void mb_seed_intv_batch(void *km, const mb_bwt_t *bwt, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, int32_t min_sub_occ, mb_sai_v *v);
+// defined in seed.c  (take mb_idx_t so seeding can dispatch to the b2 backend;
+// min_sub_occ from the sub-mem ablation feature gates Pass-2 by SA-interval size)
+void mb_seed_intv(void *km, const mb_idx_t *idx, int32_t len, const uint8_t *seq, int32_t min_len, int32_t max_sub_occ, int32_t min_sub_occ, mb_sai_v *v);
+void mb_seed_intv_batch(void *km, const mb_idx_t *idx, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, int32_t min_sub_occ, mb_sai_v *v);
 double mb_anchor(void *km, const mb_idx_t *idx, mb_sai_v *u, int32_t min_len, int32_t qlen, const uint8_t *qseq, l2b_meth_t mt, int32_t max_occ, mb_anchor_v *v);
 void mb_anchor_sort(const l2b_t *l2b, int64_t n_a, mb_anchor_t *a);
 

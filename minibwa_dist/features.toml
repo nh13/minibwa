@@ -54,6 +54,10 @@ name = "index-threads-v2"
 branch = "feat/index-threads-v2"
 required = false
 output = "identical"
+# Static suite: asserts the OpenMP parallelization stays inside mb_bwt_libsais. The
+# byte-identity gate cannot see a same-output slowdown, so a merge that drops the
+# parallelization would pass it silently; this catches that on every sync.
+tests = "test/index-threads"
 summary = "parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe)"
 upstream = { status = "unsubmitted" }
 
@@ -148,6 +152,37 @@ condition = "--max-sub-occ or --min-sub-occ is set"
 negative = "align the chrM fixture with neither flag; SAM must be byte-identical to stock"
 summary = "expose --max-sub-occ and --min-sub-occ ablation flags"
 upstream = { pr = 12, status = "rejected" }
+
+# --- SA-density / regime / backend features (index + map side) ---
+# Appended after the shared-file features and before the hub so every feature
+# above keeps its existing merge order (and its rerere pre-images). cp-occ-backend
+# is stacked on sa-regime-picker (its branch contains it), so it MUST merge after
+# it; only its incremental cp_occ delta lands once sa-regime-picker is already in.
+[[feature]]
+name = "sa-default-u3"
+branch = "sa-default-u3"
+required = false
+output = "identical"
+summary = "default the SA sample rate to 1/8 (-u 3); ~5-6% faster mapping for ~+3 GB RAM on hg38, all native densities byte-identical"
+upstream = { status = "unsubmitted" }
+
+[[feature]]
+name = "sa-regime-picker"
+branch = "sa-regime-picker"
+required = false
+output = "identical"
+summary = "--index-regime picker with auto speed/memory selection over byte-identical native SA densities (--index-mem, --list-regimes)"
+upstream = { status = "unsubmitted" }
+
+[[feature]]
+name = "cp-occ-backend"
+branch = "feat/cp-occ-backend"
+required = false
+output = "conditional"
+condition = "built with make B2=1 and a cp_occ (-b2) regime is selected"
+negative = "align the chrM fixture with a stock (non-B2) build; SAM must be byte-identical to stock"
+summary = "compile-optional cp_occ (bwa-mem2/mem3 FM-index) seeding backend (make B2=1); ~5-12% faster at matched density, differs from native for ~0.05% of reads (MAPQ-0 multimappers)"
+upstream = { status = "unsubmitted" }
 
 # --- the hub: touches 9 shared files, merges last, never blocks the build ---
 [[feature]]

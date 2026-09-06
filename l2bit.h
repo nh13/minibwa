@@ -75,6 +75,17 @@ int l2b_save(const char *fn, const l2b_t *l2b);
 int l2b_save_pac(const char *fn, const l2b_t *l2b, int both_strand);
 int l2b_save_pac_meth(const char *fn, const l2b_t *l2b, int both_strand);
 
+#ifdef MB_HAVE_B2
+/* Phase-2: build an in-memory l2b_t equivalent to <prefix>.l2b directly from
+ * bwa-mem3's bns + packed 2-bit reference, so the cp_occ backend does not
+ * need minibwa's own .l2b file. `bns` is the opaque bntseq_t* produced by
+ * mb_b2_load_bns (b2idx.h); `pac`/`l_pac` are its packed-reference buffer and
+ * base count. Deep-copies everything into freshly allocated buffers, so the
+ * caller may free bns/pac (e.g. via mb_b2_free_bns) immediately afterwards.
+ * Returns a heap-allocated, non-mmap l2b_t (destroy with l2b_destroy). */
+l2b_t *l2b_from_bns(const void *bns, const uint8_t *pac, int64_t l_pac);
+#endif
+
 static inline int l2b_get0(const l2b_t *l2b, uint64_t i)
 {
 	return l2b->pac[i>>5] >> ((i&31)<<1) & 3;

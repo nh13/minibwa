@@ -5,10 +5,11 @@ Makefile.bak
 minibwa
 tmp
 __pycache__/
+api-test/mbmap-one
+api-test/mbmap-batch
 .superpowers/
+.build-mode
 
 # api-test helper programs. `make test` builds these from tracked sources in
 # api-test/, so the binaries are artifacts.
 api-test/ex-*-check
-api-test/mbmap-batch
-api-test/mbmap-one

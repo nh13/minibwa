@@ -26,6 +26,9 @@
 | `meth-sam-tags` | [lh3/minibwa#15](https://github.com/lh3/minibwa/pull/15) | open | conditional | emit Bismark-compatible XR/XG/XM tags |
 | `soft-clip-penalty` | [lh3/minibwa#13](https://github.com/lh3/minibwa/pull/13) | rejected | conditional | 5'/3' soft-clip penalty (-L) |
 | `submem-ablation` | [lh3/minibwa#12](https://github.com/lh3/minibwa/pull/12) | rejected | conditional | expose --max-sub-occ and --min-sub-occ ablation flags |
+| `sa-default-u3` | — | unsubmitted | identical | default the SA sample rate to 1/8 (-u 3); ~5-6% faster mapping for ~+3 GB RAM on hg38, all native densities byte-identical |
+| `sa-regime-picker` | — | unsubmitted | identical | --index-regime picker with auto speed/memory selection over byte-identical native SA densities (--index-mem, --list-regimes) |
+| `cp-occ-backend` | — | unsubmitted | conditional | compile-optional cp_occ (bwa-mem2/mem3 FM-index) seeding backend (make B2=1); ~5-12% faster at matched density, differs from native for ~0.05% of reads (MAPQ-0 multimappers) |
 | `alt-liftgroup` | — | unsubmitted | conditional | ALT-aware mapping via post-extension liftover groups |
 <!-- DISTRO:END -->
 
@@ -107,6 +110,15 @@ minibwa index ref.fa prefix  # use a different index prefix instead of ref.fa
 minibwa index -l ref.fa      # use less memory at the cost of performance
 minibwa index --meth ref.fa  # generate BS-seq index
 ```
+
+> **minibwa samples the suffix array at 1/8 by default (`-u 3`).** Mapping is
+> ~12% faster in the mapping phase on hg38 (measured: 1/8 is 1.12× the 1/16
+> map-phase throughput); the index and peak RAM grow by ~3 GB (≈9 → ≈12 GB).
+> Build with `minibwa index -u 4` for the previous 1/16 index (smaller, ~12%
+> slower). Denser than 1/8 (`-u 2`/`-u 1`) is **not** recommended for routine
+> use: the speed gain flattens sharply (≈1.19–1.23×) while RAM grows 2–6×, so
+> the extra memory buys little.
+
 Minibwa generates two files: `ref.fa.l2b` for 2-bit encoded reference genome
 sequences and `ref.fa.mbw` for BWT and sampled suffix array. In the `--meth`
 mode, minibwa additionally generates `ref.fa.meth.mbw` for the BWT of the

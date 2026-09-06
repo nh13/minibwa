@@ -237,6 +237,68 @@ l2b_t *l2b_import(const char *fn, uint64_t seed)
 	return l2b;
 }
 
+#ifdef MB_HAVE_B2
+/* bntseq.h is bwa-mem3's reference-sequence API; found via the
+ * -I$(BWAMEM3_DIR)/src path this translation unit's compile rule adds under
+ * `make B2=1` (Makefile). Guarded by MB_HAVE_B2 so a native (no-B2) build
+ * never needs that path and l2bit.o's command line is unchanged. */
+#include "bntseq.h"
+
+/* Phase-2: reconstruct an l2b_t from bwa-mem3's bns+pac instead of reading
+ * <prefix>.l2b. `bns_` is the opaque bntseq_t* from mb_b2_load_bns (b2idx.h);
+ * `pac`/`l_pac` are its packed 2-bit reference buffer and base count.
+ *
+ * Converts bwa's high-bit-first packed reference (_get_pac) to minibwa's
+ * low-bit-first uint64 word layout (l2b_get0/l2b_pac's convention: base i
+ * lives at bit offset (i&31)*2 within pac[i>>5]), and bwa's N-run holes
+ * (bns->ambs[], offset+len) into l2b's ambi[] (st/en), which is how
+ * l2b_getseq marks N bases (the base value packed at those pac positions is
+ * irrelevant -- l2b_getseq overwrites them with 4 via ambi -- matching the
+ * benign N-substitution difference already characterized between the two
+ * indexes' pac content).
+ *
+ * bns has no soft-mask concept, so l->mask/n_mask stay empty (kom_calloc
+ * zeroes the whole struct); nothing downstream of seeding+chaining+extension
+ * consults l2b's mask table. Deep-copies everything, so the caller may free
+ * bns/pac immediately after this returns. */
+l2b_t *l2b_from_bns(const void *bns_, const uint8_t *pac, int64_t l_pac)
+{
+	const bntseq_t *bns = (const bntseq_t*)bns_;
+	l2b_t *l = kom_calloc(l2b_t, 1);
+	int64_t i;
+	int t;
+
+	l->tot_len = l_pac;
+	l->n_ctg = l->m_ctg = bns->n_seqs;
+	l->ctg = kom_calloc(l2b_ctg_t, l->n_ctg);
+	for (t = 0; t < bns->n_seqs; ++t) {
+		const bntann1_t *ann = &bns->anns[t];
+		l->ctg[t].name = kom_strdup(ann->name);
+		l->ctg[t].comm = (ann->anno && ann->anno[0])? kom_strdup(ann->anno) : 0;
+		l->ctg[t].len  = ann->len;
+		l->ctg[t].off  = ann->offset;
+	}
+
+	l->n_pac = l->m_pac = (l_pac + 31) >> 5; // 32 bases per uint64
+	l->pac = kom_calloc(uint64_t, l->n_pac);
+	for (i = 0; i < l_pac; ++i) { // bit-order conversion: high-bit-first -> low-bit-first
+		int c = _get_pac(pac, i);
+		l->pac[i>>5] |= (uint64_t)c << ((i & 31) << 1);
+	}
+
+	l->n_ambi = l->m_ambi = bns->n_holes;
+	l->ambi = kom_calloc(l2b_intv_t, l->n_ambi? l->n_ambi : 1);
+	for (t = 0; t < bns->n_holes; ++t) {
+		l->ambi[t].st = bns->ambs[t].offset;
+		l->ambi[t].en = bns->ambs[t].offset + bns->ambs[t].len;
+	}
+
+	l->n_mask = l->m_mask = 0; // bns has no soft-mask
+	l2b_collate_str(l); // collate ctg[].name/comm into cat_name/cat_comm (matches l2b_import)
+	return l;
+}
+#endif
+
 void l2b_destroy(l2b_t *l2b)
 {
 	uint64_t i;

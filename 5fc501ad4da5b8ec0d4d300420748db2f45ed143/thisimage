@@ -185,7 +185,10 @@ libminibwa.a:$(LOBJS)
 		$(AR) -csru $@ $(LOBJS)
 
 minibwa:libminibwa.a $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o
-		$(LINK) $(LINK_FLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o -o $@ -L. -lminibwa $(LIBS) $(B3_LDLIBS)
+		# $(LIBS) (-lz ...) MUST follow $(B3_LDLIBS): static libhts.a in there needs zlib
+		# resolved after it, or the B2 link fails on undefined zlib symbols. Native builds
+		# have an empty $(B3_LDLIBS), so this is just $(LIBS) at the end as before.
+		$(LINK) $(LINK_FLAGS) $(LDFLAGS) $(MALLOC_O) $(AOBJS) $(B2OBJS) main.o -o $@ -L. -lminibwa $(B3_LDLIBS) $(LIBS)
 
 clean:
 		rm -fr *.o a.out $(PROG) *~ *.a *.dSYM .build-mode

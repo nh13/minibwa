@@ -325,7 +325,7 @@ static int usage_index(FILE *fp, uint64_t seed, int sa_bit, int n_thread)
 	fprintf(fp, "Usage: minibwa index [options] <in.fasta> [out.prefix]\n");
 	fprintf(fp, "Options:\n");
 	fprintf(fp, "  -s INT    random seed for amibiguous bases [%ld]\n", (unsigned long)seed);
-	fprintf(fp, "  -u INT    SA sample rate at 1/(1<<INT) [%d]\n", sa_bit);
+	fprintf(fp, "  -u INT[,INT]  SA sample rate(s) at 1/(1<<INT); a comma list builds several densities, densest bundled [%d]\n", sa_bit);
 	fprintf(fp, "  -l        low-memory GPL'd algorithm for BWT construction\n");
 	fprintf(fp, "  -b NUM    block size (effective with -l) [10m]\n");
 #ifdef LIBSAIS_OPENMP
@@ -575,13 +575,17 @@ int main_index(int argc, char *argv[])
 		// guards against (a new .l2b silently paired with a stale BWT).
 		have_mbw = (access(fn_bwt, R_OK) == 0);
 		reused = have_mbw && mb_fp_matches(fn_fp, l2b->tot_len, cur_hash);
-		if (have_mbw && !reused) {
+		if (have_mbw && !reused)
 			fprintf(stderr, "WARNING: \"%s\" exists but its fingerprint is missing, unreadable, or "
 				"doesn't match the current reference; rebuilding the BWT from scratch\n", fn_bwt);
-			// Abort if a stale sidecar can't be removed: leaving it beside the new
-			// BWT lets mb_bwt_load_sa attach it by count with wrong SA coordinates.
-			if (mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
-		}
+		// A fresh build publishes a new BWT, so any pre-existing .sa.u<N> sidecars were
+		// sampled from a previous reference and must not survive beside it. Do this on
+		// EVERY fresh build, not only when a .mbw exists -- a deleted .mbw or a
+		// partially-copied index dir can leave sidecars with no .mbw, and those would
+		// otherwise be attached by mb_bwt_load_sa with wrong SA coordinates (the exact
+		// failure the fingerprint guards against). Abort if one can't be removed, before
+		// the new BWT is published.
+		if (!reused && mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
 		if (reused) peek_bundled_sa_bit(fn_bwt, &bundled_sa_bit); // best-effort; a failure here just disables the dedup below
 		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
 		if (bwt == NULL) { bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread); reused = 0; }

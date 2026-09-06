@@ -590,7 +590,9 @@ int main_index(int argc, char *argv[])
 		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
 		if (bwt == NULL) { bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread); reused = 0; }
 		if (!reused) { // fresh build: densest requested density is bundled into the .mbw
-			mb_bwt_gen_sa(bwt, sa_bits[0]);
+			// mb_bwt_libsais() already returned bwt with its SA sampled at sa_bits[0]
+			// (bwt->sa/sa_bit/n_sa are set there), so no mb_bwt_gen_sa is needed here --
+			// regenerating it would repeat a full large-index pass and allocation.
 			if (mb_bwt_save(fn_bwt, bwt) != 0) { rc = 1; goto cleanup; }
 			if (mb_fp_write(fn_fp, l2b->tot_len, cur_hash) != 0) { rc = 1; goto cleanup; } // record identity; must follow the .mbw save
 		}

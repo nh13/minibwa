@@ -413,7 +413,7 @@ int main_index(int argc, char *argv[])
 {
 	ketopt_t o = KETOPT_INIT;
 	int c, low_mem = 0, n_thread = 4, is_meth = 0, rc = 0;
-	int sa_bits[8], n_sa_bits = 0;
+	int sa_bits[8] = {4}, n_sa_bits = 0; // sa_bits[0] carries the -u default until a -u arg overrides it; single source for both --help and the build
 	int64_t block_size = 10000000;
 	uint64_t seed = 11;
 	// fn_l2b/fn_bwt/fn_meth_bwt/fn_fp/l2b/bwt/side are hoisted to function scope (rather
@@ -438,10 +438,10 @@ int main_index(int argc, char *argv[])
 				fprintf(stderr, "WARNING: -u accepts at most 8 SA densities; extra values in \"%s\" were ignored\n", o.arg);
 		}
 		else if (c == 's') seed = atol(o.arg);
-		else if (c == 901) return usage_index(stdout, seed, n_sa_bits? sa_bits[0] : 4, n_thread);
+		else if (c == 901) return usage_index(stdout, seed, sa_bits[0], n_thread);
 		else if (c == 902) is_meth = 1;
 	}
-	if (n_sa_bits == 0) { sa_bits[0] = 4; n_sa_bits = 1; } // default when -u is absent
+	if (n_sa_bits == 0) n_sa_bits = 1; // -u absent: keep the default already in sa_bits[0]
 	qsort(sa_bits, n_sa_bits, sizeof(int), cmp_int); // ascending: sa_bits[0] is densest (smallest sa_bit) -> bundled in .mbw
 	if (n_sa_bits > 1 && is_meth) {
 		fprintf(stderr, "ERROR: multi-density -u (comma list) is not supported together with --meth\n");

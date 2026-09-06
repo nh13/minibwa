@@ -382,3 +382,106 @@ def test_run_gates_includes_the_feature_suites(tmp_path: Path) -> None:
     )
 
     assert any(r.name == "tests:x" for r in results)
+
+
+def _stub_aligner_with_u_default(path: Path, sam: str, u_default: str) -> Path:
+    """A stub aligner that also answers `index --help` with a `-u ... [N]` line.
+
+    The plain `stub_aligner` exits 0 for any `index` invocation with no output,
+    so it cannot exercise the sa-default-u3 help-default gate. This one prints a
+    realistic `-u` option line (default `u_default`) for `index --help`, still
+    exits 0 for a bare `index` build, and prints `sam` for `map` -- so it drives
+    both the byte-identity comparison and the help-default check.
+    """
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "index" ] && [ "$2" = "--help" ]; then\n'
+        f"  printf '  -u INT[,INT]  SA sample rate(s) at 1/(1<<INT) [%s]\\n' '{u_default}'\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "index" ]; then exit 0; fi\n'
+        "cat <<'SAM'\n" + sam + "SAM\n"
+        'flags=""; n=0\n'
+        'for a in "$@"; do case "$a" in -*) flags="$flags $a" ;; *) n=$((n+1)) ;; esac; done\n'
+        "printf 'mode\\t%s\\t%s\\n' \"$flags\" \"$n\"\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_sa_default_u3_help_default_passes_when_help_shows_3(tmp_path: Path) -> None:
+    """With sa-default-u3 in the build, `index --help` advertising [3] passes."""
+    sam = "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n"
+    binary = _stub_aligner_with_u_default(tmp_path / "minibwa", sam, "3")
+    manifest = Manifest(features=(_identical_feature("sa-default-u3"),), withdrawn=())
+
+    results = run_gates(
+        binary, binary, _fixtures(tmp_path), manifest, tmp_path / "wd", merged=("sa-default-u3",)
+    )
+
+    [check] = [r for r in results if r.name == "sa-default-u3:help-default"]
+    assert check.passed, check.detail
+
+
+def test_sa_default_u3_help_default_fails_when_help_reverts_to_4(tmp_path: Path) -> None:
+    """A build that reverts the -u default to stock [4] fails the gate.
+
+    This is the regression the byte-identity gates cannot see: SA density never
+    changes a SAM record, so only this explicit check catches the revert.
+    """
+    sam = "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n"
+    binary = _stub_aligner_with_u_default(tmp_path / "minibwa", sam, "4")
+    manifest = Manifest(features=(_identical_feature("sa-default-u3"),), withdrawn=())
+
+    results = run_gates(
+        binary, binary, _fixtures(tmp_path), manifest, tmp_path / "wd", merged=("sa-default-u3",)
+    )
+
+    [check] = [r for r in results if r.name == "sa-default-u3:help-default"]
+    assert not check.passed
+    assert "[4]" in check.detail
+
+
+def test_sa_default_u3_help_default_absent_when_feature_not_in_build(tmp_path: Path) -> None:
+    """No help-default gate when sa-default-u3 is not a feature of this build.
+
+    A manifest without sa-default-u3 (or a merged list that excludes it) must not
+    trip the check -- otherwise stub-binary tests and #39-only builds fail on a
+    default they never claim.
+    """
+    sam = "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n"
+    binary = _stub_aligner_with_u_default(tmp_path / "minibwa", sam, "4")
+    manifest = Manifest(features=(_identical_feature("other"),), withdrawn=())
+
+    results = run_gates(
+        binary, binary, _fixtures(tmp_path), manifest, tmp_path / "wd", merged=("other",)
+    )
+
+    assert not any(r.name == "sa-default-u3:help-default" for r in results)
+
+
+def test_sa_default_u3_help_default_resolves_a_relative_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The help-default check must resolve a relative candidate path too.
+
+    CI passes `Path("./minibwa")`; a slash-free string sends subprocess to PATH,
+    not cwd, so the check must `.resolve()` like align_fixture does. Regression
+    test for the first CI run of this gate, which died with FileNotFoundError.
+    """
+    sam = "@SQ\tSN:chrM\nr1\t0\tchrM\t1\t60\t10M\n"
+    _stub_aligner_with_u_default(tmp_path / "minibwa", sam, "3")
+    monkeypatch.chdir(tmp_path)
+    manifest = Manifest(features=(_identical_feature("sa-default-u3"),), withdrawn=())
+
+    results = run_gates(
+        Path("./minibwa"),
+        Path("./minibwa"),
+        _fixtures(tmp_path),
+        manifest,
+        tmp_path / "wd",
+        merged=("sa-default-u3",),
+    )
+
+    [check] = [r for r in results if r.name == "sa-default-u3:help-default"]
+    assert check.passed, check.detail

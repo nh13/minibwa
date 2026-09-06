@@ -10,6 +10,7 @@ textually plausible and semantically wrong.
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -257,6 +258,32 @@ def run_feature_suites(
     return results
 
 
+def _index_u_default(binary: Path) -> str | None:
+    """The `-u` default the binary advertises in `index --help`, e.g. "3" for `[3]`.
+
+    Returns the digits inside the trailing `[...]` of the `-u` option line, or
+    None if that line or its bracket can't be found. SA-sample-rate defaults
+    never change a single SAM record, so the byte-identity gate is blind to them
+    -- which is exactly how the distribution's `-u` default silently reverted
+    once (the runtime default was flipped by an adjacent feature's merge while
+    the help text was not). This reads the number the user is actually told, so a
+    revert becomes a hard gate failure instead of an invisible one.
+    """
+    # Resolve to absolute for the same reason align_fixture does: a slash-free
+    # relative path (e.g. Path("./minibwa") -> "minibwa") makes subprocess do a
+    # PATH lookup instead of finding the same-directory binary. CI passes a
+    # relative candidate path, so this is load-bearing, not cosmetic.
+    binary = binary.resolve()
+    proc = subprocess.run(
+        [str(binary), "index", "--help"], capture_output=True, text=True, check=False
+    )
+    for line in (proc.stdout + proc.stderr).splitlines():
+        if line.lstrip().startswith("-u "):
+            match = re.search(r"\[(\d+)\]", line)
+            return match.group(1) if match else None
+    return None
+
+
 def run_gates(
     candidate_bin: Path,
     stock_bin: Path,
@@ -328,6 +355,30 @@ def run_gates(
                         if passed
                         else f"SAM differs under `{invocation}`: "
                         f"stock {stock[:12]} vs candidate {cand[:12]}"
+                    ),
+                )
+            )
+
+        # Guard the one property byte-identity cannot see: the -u default. When
+        # sa-default-u3 is in the build the distribution must advertise (and,
+        # since --help and the build now share sa_bits[0], use) 1/8 -> [3], not
+        # stock's [4]. A merge that drops the default back to 4 changes no SAM
+        # byte, so only this explicit check catches it.
+        sa_default_u3_in_build = (
+            any(f.name == "sa-default-u3" for f in manifest.features)
+            and in_build("sa-default-u3")
+        )
+        if sa_default_u3_in_build:
+            shown = _index_u_default(candidate_bin)
+            results.append(
+                GateResult(
+                    name="sa-default-u3:help-default",
+                    passed=shown == "3",
+                    detail=(
+                        "index --help advertises -u default [3]"
+                        if shown == "3"
+                        else "expected -u default [3] with sa-default-u3 in the build, got "
+                        + (f"[{shown}]" if shown is not None else "no -u default line")
                     ),
                 )
             )

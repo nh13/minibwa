@@ -591,7 +591,15 @@ int main_index(int argc, char *argv[])
 		if (!reused && mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
 		if (reused) peek_bundled_sa_bit(fn_bwt, &bundled_sa_bit); // best-effort; a failure here just disables the dedup below
 		bwt = reused? mb_bwt_load_nosa(fn_bwt) : NULL;
-		if (bwt == NULL) { bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread); reused = 0; }
+		if (bwt == NULL) {
+			// A matching-fingerprint .mbw that fails to load falls through to a fresh
+			// rebuild, but the pre-load removal above ran only for !reused. Drop stale
+			// sidecars here too before publishing the replacement, or a leftover
+			// .sa.u<N> would be attached to it with wrong SA coordinates.
+			if (reused && mb_fp_remove_stale_sidecars(prefix) != 0) { rc = 1; goto cleanup; }
+			bwt = mb_bwt_libsais(l2b, sa_bits[0], 1, 0, n_thread);
+			reused = 0;
+		}
 		if (!reused) { // fresh build: densest requested density is bundled into the .mbw
 			// mb_bwt_libsais() already returned bwt with its SA sampled at sa_bits[0]
 			// (bwt->sa/sa_bit/n_sa are set there), so no mb_bwt_gen_sa is needed here --

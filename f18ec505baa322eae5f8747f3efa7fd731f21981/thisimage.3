@@ -313,6 +313,9 @@ int main_gensa(int argc, char *argv[])
 	if (sa_bit < 0 || sa_bit >= 32) { fprintf(stderr, "ERROR: -u must be in [0,32)\n"); return 1; }
 	if (argc - o.ind < 2) return usage_gensa(stderr, sa_bit);
 	bwt = is_raw? mb_bwt_load_raw(argv[o.ind]) : mb_bwt_load(argv[o.ind]);
+	// mb_bwt_load() returns NULL for a missing/unreadable/corrupt BWT; guard before
+	// mb_bwt_gen_sa() dereferences it. (mb_bwt_load_raw has a different contract.)
+	if (bwt == NULL) { fprintf(stderr, "ERROR: failed to load the input BWT file \"%s\"\n", argv[o.ind]); return 1; }
 	mb_bwt_gen_sa(bwt, sa_bit);
 	if (mb_bwt_save(argv[o.ind+1], bwt) != 0) { mb_bwt_destroy(bwt); return 1; } // writer already reported the error
 	mb_bwt_destroy(bwt);

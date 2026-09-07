@@ -26,7 +26,8 @@ static inline void mb_smem_batch_dispatch(void *km, const mb_idx_t *idx, int32_t
 #endif
 
 #define key_sai0(a) ((a).x[0])
-KRADIX_SORT_INIT(mb_sai0, mb_sai_t, key_sai0, 8)
+// key_sai0 is an SA/BWT coordinate, bounded by the index length (< 2^40); 5 bytes suffice.
+KRADIX_SORT_INIT(mb_sai0, mb_sai_t, key_sai0, 5)
 
 #define key_sais(a) ((a).size)
 KRADIX_SORT_INIT(mb_sais, mb_sai_t, key_sais, 8)
@@ -35,7 +36,8 @@ KRADIX_SORT_INIT(mb_sais, mb_sai_t, key_sais, 8)
 KRADIX_SORT_INIT(mb_saii, mb_sai_t, key_saii, 8)
 
 #define key_anchor(a) ((a).tpos)
-KRADIX_SORT_INIT(mb_anchor, mb_anchor_t, key_anchor, 8)
+// key_anchor is a concatenated-reference coordinate, bounded by the index length (< 2^40); 5 bytes suffice.
+KRADIX_SORT_INIT(mb_anchor, mb_anchor_t, key_anchor, 5)
 
 /***********
  * Seeding *

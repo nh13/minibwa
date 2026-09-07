@@ -69,6 +69,21 @@ output = "identical"
 summary = "AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT"
 upstream = { pr = 20, status = "open" }
 
+[[feature]]
+name = "radix-key-width"
+branch = "perf/radix-key-width"
+required = false
+output = "identical"
+# Touches seed.c/map-algo.c/lchain.c/pe.c/mbpriv.h, which the alt-liftgroup hub
+# also edits -- so it stays in this disjoint cluster (merged before the hub) and
+# overlaps no other feature here.
+# upstreamable = false: kept downstream-only by request; the reconcile bot must not
+# nominate it. (The win is real per-sort but ~0 end-to-end, so it is not worth an
+# upstream PR on its own.)
+upstreamable = false
+summary = "right-size klib radix key widths -- 5-byte genome-coordinate and 4-byte int32 chain-score sorts; byte-identical, 1.5-4.9x per-sort but <~1% of map CPU"
+upstream = { status = "unsubmitted" }
+
 # smem-search-memtraffic graduated: upstream took the occ prefetch as lh3/minibwa#65
 # (c42d875), so master carries it and the block is deleted per "Removing a feature".
 # Recording status = "merged" is not an option -- the parser rejects graduated

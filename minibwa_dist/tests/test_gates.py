@@ -403,7 +403,7 @@ def _stub_aligner_with_u_default(path: Path, sam: str, u_default: str) -> Path:
         "cat <<'SAM'\n" + sam + "SAM\n"
         'flags=""; n=0\n'
         'for a in "$@"; do case "$a" in -*) flags="$flags $a" ;; *) n=$((n+1)) ;; esac; done\n'
-        "printf 'mode\\t%s\\t%s\\n' \"$flags\" \"$n\"\n"
+        'printf \'mode\\t%s\\t%s\\n\' "$flags" "$n"\n'
     )
     path.chmod(0o755)
     return path

@@ -25,6 +25,7 @@ def _cta_artefact(tmp_path: Path, features: str) -> Path:
     )
     return art
 
+
 MANIFEST = Manifest(
     features=(
         Feature(

@@ -8,6 +8,14 @@
 
 #define key_128x(a) ((a).x)
 KRADIX_SORT_INIT(mb128x, mb128_t, key_128x, 8)
+// Narrowed key-width variants for radix_sort. The klib radix does one 8-bit pass
+// per key byte, so declaring the true key width skips passes over always-zero high
+// bytes. Both bounds below are structural, not workload-dependent:
+//   _b5: keys that are concatenated-reference coordinates, bounded by the index
+//        length (< 2^40, i.e. references up to ~1 Tbp).
+//   _b4: keys that are a non-negative int32 chain score stored in a uint64 (< 2^32).
+KRADIX_SORT_INIT(mb128x_b5, mb128_t, key_128x, 5)
+KRADIX_SORT_INIT(mb128x_b4, mb128_t, key_128x, 4)
 
 #define key_64(a) (a)
 KRADIX_SORT_INIT(mb64, uint64_t, key_64, 8)

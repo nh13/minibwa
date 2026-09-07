@@ -6,20 +6,84 @@
 #include "kseq.h"
 KSEQ_INIT(gzFile, gzread)
 
+// l2b_pos2cid()'s per-bucket contig range is scanned linearly when it holds at most this many
+// contigs (the common case on ordinary references), and binary-searched otherwise, bounding the
+// worst case (e.g. a run of many zero-length contigs, or a few huge contigs sharing a bucket with
+// many tiny ones) to O(log k) instead of O(k).
+#define L2B_CTG_BUCKET_SCAN_MAX 8
+
+// Build the position->contig bucket table used by l2b_pos2cid(). Must be called once ctg[].off/len
+// and tot_len are final. Each bucket holds the first contig whose end exceeds the bucket start, so a
+// lookup is one table read plus a short forward scan over the (few) contigs sharing the bucket.
+static void l2b_build_ctg_bucket(l2b_t *l2b)
+{
+	uint64_t b, n_bucket;
+	int shift;
+	int64_t cid = 0;
+	free(l2b->ctg_bucket);
+	l2b->ctg_bucket = 0, l2b->n_bucket = 0, l2b->bucket_shift = 0;
+	if (l2b->n_ctg == 0 || l2b->tot_len == 0) return;
+	// choose the shift so there are ~2x n_ctg buckets (compute in locals, then publish once)
+	for (shift = 0; (l2b->tot_len >> shift) > 2 * l2b->n_ctg && shift < 40; ++shift);
+	n_bucket = (l2b->tot_len >> shift) + 1;
+	l2b->bucket_shift = shift;
+	l2b->n_bucket = n_bucket;
+	l2b->ctg_bucket = kom_calloc(int64_t, n_bucket);
+	for (b = 0; b < n_bucket; ++b) {
+		uint64_t bpos = b << shift;
+		while (cid < (int64_t)l2b->n_ctg && l2b->ctg[cid].off + l2b->ctg[cid].len <= bpos) ++cid;
+		l2b->ctg_bucket[b] = cid;
+	}
+}
+
 static int64_t l2b_pos2cid(const l2b_t *l2b, int64_t s, int64_t len, int64_t *cst)
 {
-	int64_t lo = 0, hi = l2b->n_ctg, mid;
-	while (lo < hi) {
-		const l2b_ctg_t *ctg;
-		mid = (lo + hi) / 2;
-		ctg = &l2b->ctg[mid];
-		if (ctg->off <= s && s < ctg->off + ctg->len) {
-			*cst = s - ctg->off;
-			return s + len <= ctg->off + ctg->len? mid : -1;
-		} else if (s < ctg->off) hi = mid;
-		else lo = mid + 1;
+	int64_t cid;
+	const l2b_ctg_t *ctg;
+	if (l2b->ctg_bucket == 0) { // no bucket table (e.g. before a loader finished): original binary search
+		int64_t lo = 0, hi = l2b->n_ctg, mid;
+		while (lo < hi) {
+			mid = (lo + hi) / 2;
+			ctg = &l2b->ctg[mid];
+			if (ctg->off <= s && s < ctg->off + ctg->len) {
+				*cst = s - ctg->off;
+				return s + len <= ctg->off + ctg->len? mid : -1;
+			} else if (s < ctg->off) hi = mid;
+			else lo = mid + 1;
+		}
+		return -1; // s is in no contig
 	}
-	return -1; // s is in no contig
+	if (s < 0 || (uint64_t)s >= l2b->tot_len) return -1; // s is in no contig
+	{
+		// The containing contig, if any, is provably within [cid0, upper): cid0 is the first
+		// contig whose end exceeds this bucket's start (<=s), and no contig at or after
+		// ctg_bucket[b+1] -- the first whose end exceeds the NEXT bucket's start -- can end at or
+		// before s, which is still within this bucket, so the containing contig's index is <=
+		// ctg_bucket[b+1].
+		uint64_t b = (uint64_t)s >> l2b->bucket_shift;
+		int64_t cid0 = l2b->ctg_bucket[b];
+		int64_t upper = (b + 1 < l2b->n_bucket)? l2b->ctg_bucket[b + 1] + 1 : (int64_t)l2b->n_ctg;
+		if (upper > (int64_t)l2b->n_ctg) upper = (int64_t)l2b->n_ctg;
+		if (upper - cid0 <= L2B_CTG_BUCKET_SCAN_MAX) { // small bucket (the common case): bounded forward scan
+			cid = cid0;
+			while (cid < upper && l2b->ctg[cid].off + l2b->ctg[cid].len <= (uint64_t)s) ++cid; // skip contigs ending at or before s
+			if (cid >= upper || l2b->ctg[cid].off > (uint64_t)s) return -1; // s is in no contig
+		} else { // large/skewed bucket: binary search the same proven range, bounding the worst case to O(log k)
+			int64_t lo = cid0, hi = upper, mid;
+			cid = -1;
+			while (lo < hi) {
+				mid = lo + (hi - lo) / 2;
+				ctg = &l2b->ctg[mid];
+				if (ctg->off <= (uint64_t)s && (uint64_t)s < ctg->off + ctg->len) { cid = mid; break; }
+				else if ((uint64_t)s < ctg->off) hi = mid;
+				else lo = mid + 1;
+			}
+			if (cid < 0) return -1; // s is in no contig
+		}
+	}
+	ctg = &l2b->ctg[cid];
+	*cst = s - ctg->off;
+	return s + len <= ctg->off + ctg->len? cid : -1;
 }
 
 int64_t l2b_intv2cid(const l2b_t *l2b, uint64_t st, uint64_t en, int64_t *cst, int *rev)
@@ -225,6 +289,7 @@ l2b_t *l2b_import(const char *fn, uint64_t seed)
 	kseq_destroy(ks);
 	gzclose(fp);
 	l2b_collate_str(l2b);
+	l2b_build_ctg_bucket(l2b);
 	return l2b;
 }
 
@@ -237,6 +302,7 @@ void l2b_destroy(l2b_t *l2b)
 		free(l2b->cat_name); free(l2b->cat_comm);
 		free(l2b->pac); free(l2b->ambi); free(l2b->mask); free(l2b->ctg);
 	}
+	free(l2b->ctg_bucket);
 	free(l2b);
 }
 
@@ -322,6 +388,7 @@ l2b_t *l2b_load(const char *fn)
 	}
 	if (p_name - l2b->cat_name != len_name || p_comm - l2b->cat_comm != len_comm) goto load_failure;
 	if (fp != stdin) fclose(fp);
+	l2b_build_ctg_bucket(l2b);
 	return l2b;
 load_failure:
 	if (fp != stdin) fclose(fp);
@@ -380,6 +447,7 @@ l2b_t *l2b_load_mmap(const char *fn, int preload)
 		p_comm += *p_comm? strlen(p_comm) + 1 : 1;
 	}
 	if (p_name - l2b->cat_name != len_name || p_comm - l2b->cat_comm != len_comm) goto mmap_failure;
+	l2b_build_ctg_bucket(l2b);
 	return l2b;
 mmap_failure:
 	l2b_destroy(l2b);

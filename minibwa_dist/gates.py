@@ -364,10 +364,9 @@ def run_gates(
         # since --help and the build now share sa_bits[0], use) 1/8 -> [3], not
         # stock's [4]. A merge that drops the default back to 4 changes no SAM
         # byte, so only this explicit check catches it.
-        sa_default_u3_in_build = (
-            any(f.name == "sa-default-u3" for f in manifest.features)
-            and in_build("sa-default-u3")
-        )
+        sa_default_u3_in_build = any(
+            f.name == "sa-default-u3" for f in manifest.features
+        ) and in_build("sa-default-u3")
         if sa_default_u3_in_build:
             shown = _index_u_default(candidate_bin)
             results.append(

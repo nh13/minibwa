@@ -189,7 +189,8 @@ def _notes(args: argparse.Namespace) -> int:
 def _docs(args: argparse.Namespace) -> int:
     """Regenerate README.md's distribution block and GRAVEYARD.md in place."""
     manifest = load_manifest(Path(args.manifest))
-    update_readme(Path(args.readme), manifest)
+    cta_path = Path(args.cta) if args.cta else None
+    update_readme(Path(args.readme), manifest, cta_path=cta_path)
     Path(args.graveyard).write_text(render_graveyard(manifest) + "\n")
     print(f"rendered {args.readme} and {args.graveyard}", file=sys.stderr)
     return 0
@@ -248,6 +249,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("docs", help="regenerate README.md block and GRAVEYARD.md")
     p.add_argument("--readme", default="README.md", help="README to rewrite the distro block in")
     p.add_argument("--graveyard", default="GRAVEYARD.md", help="graveyard file to overwrite")
+    p.add_argument(
+        "--cta",
+        default="minibwa_dist/cta.md",
+        help="benchmark CTA artifact (from the bench harness); prepended to the "
+        "distro block when present and its feature set still matches the manifest. "
+        "Pass '' to omit. A missing file renders nothing, so the default is safe.",
+    )
     p.set_defaults(func=_docs)
 
     p = sub.add_parser("gates", help="run the output gates; exit 1 if any fails")

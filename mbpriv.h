@@ -150,6 +150,8 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 
 void radix_sort_mb64(uint64_t *st, uint64_t *en);
 void radix_sort_mb128x(mb128_t *st, mb128_t *en);
+void radix_sort_mb128x_b5(mb128_t *st, mb128_t *en); // 5-byte key: reference coordinate
+void radix_sort_mb128x_b4(mb128_t *st, mb128_t *en); // 4-byte key: int32 chain score
 
 // in cs.c
 void mb_write_cs_ds(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qseq, const mb_hit_t *r, int is_ds);

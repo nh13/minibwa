@@ -157,7 +157,21 @@ Map
 bisulfite sequencing (BS-seq) data. Require an index built with
 .BR --meth .
 In this mode, an unmethylated C on read 1 is expected to be converted to T and
-an unmethylated G on read 2 converted to A. Minibwa does not support
+an unmethylated G on read 2 converted to A. Such a conversion is scored as a
+match, and the
+.B NM
+and
+.B MD
+tags do not count it, so CIGAR, SEQ and
+.B MD
+reconstruct the converted reference rather than the genome
+.RB ( "samtools calmd"
+would list the conversions). The
+.BR cs / ds
+tags and
+.B --eqx
+X operations still mark every base that differs from the reference.
+Minibwa does not support
 undirectional BS-seq.
 
 .SS Mapping Options
@@ -411,7 +425,7 @@ XA	Z	Secondary hits in (ctg,strandPos,CIGAR,NM;)+
 MC	Z	Mate CIGAR
 MQ	i	Mate mapping quality
 cg	Z	CIGAR (PAF only)
-MD	Z	Difference string in the SAM spec
+MD	Z	Difference string in the SAM spec; with --meth, conversions are not listed
 cs	Z	Difference string
 .TE
 

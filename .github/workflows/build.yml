@@ -23,3 +23,4 @@ jobs:
       - uses: actions/checkout@v7
       - run: make -j$(nproc || sysctl -n hw.ncpu)
       - run: make -j$(nproc || sysctl -n hw.ncpu) -C api-test
+      - run: sh test/meth-md/test-meth-md.sh .

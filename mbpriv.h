@@ -84,7 +84,7 @@ void radix_sort_mb128x(mb128_t *st, mb128_t *en);
 
 // in cs.c
 void mb_write_cs_ds(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qseq, const mb_hit_t *r, int is_ds);
-void mb_write_MD(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qseq, const mb_hit_t *r);
+void mb_write_MD(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qseq, const mb_hit_t *r, const int8_t *mat);
 
 // defined in format.c
 void mb_fmt_paf(kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, const mb_hit_t *p, uint64_t opt_flag, int n_seg, int seg_idx);

@@ -270,7 +270,7 @@ void mb_update_extra(void *km, mb_hit_t *r, const uint8_t *qseq, const uint8_t *
 		if (opt_flag & (MB_F_WRITE_DS|MB_F_WRITE_CS))
 			mb_write_cs_ds(km, &str, tseq, qseq, r, !!(opt_flag & MB_F_WRITE_DS));
 		else
-			mb_write_MD(km, &str, tseq, qseq, r);
+			mb_write_MD(km, &str, tseq, qseq, r, mat);
 		r->p->cs = 1;
 		len4 = r->p->n_cigar + sizeof(mb_extra_t)/4 + (str.l + 1 + 3) / 4;
 		if (len4 > r->p->cap) {

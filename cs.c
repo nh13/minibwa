@@ -126,7 +126,10 @@ void mb_write_cs_ds(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *
 	assert(t_off == r->te - r->ts && q_off == r->qe - r->qs);
 }
 
-void mb_write_MD(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qseq, const mb_hit_t *r)
+// A base is listed in MD exactly when NM counts it (see mb_update_extra()): when either base is ambiguous
+// (including N against N), or when the scoring matrix penalizes the pair. With --meth the matrix scores the
+// read's conversion (T at a reference C, or A at a reference G) as a match, so MD and NM both hide it.
+void mb_write_MD(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qseq, const mb_hit_t *r, const int8_t *mat)
 {
 	int i, q_off, t_off, l_MD = 0;
 	char *tmp;
@@ -137,7 +140,8 @@ void mb_write_MD(void *km, kstring_t *s, const uint8_t *tseq, const uint8_t *qse
 		assert((op >= MB_CIGAR_MATCH && op <= MB_CIGAR_N_SKIP) || op == MB_CIGAR_EQ_MATCH || op == MB_CIGAR_X_MISMATCH);
 		if (op == MB_CIGAR_MATCH || op == MB_CIGAR_EQ_MATCH || op == MB_CIGAR_X_MISMATCH) {
 			for (j = 0; j < len; ++j) {
-				if (qseq[q_off + j] != tseq[t_off + j]) {
+				int cq = qseq[q_off + j], ct = tseq[t_off + j];
+				if (cq > 3 || ct > 3 || mat[ct * 5 + cq] < 0) {
 					km_sprintf_lite(km, s, "%d%c", l_MD, "ACGTN"[tseq[t_off + j]]);
 					l_MD = 0;
 				} else ++l_MD;

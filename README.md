@@ -44,8 +44,10 @@ structural changes anyway.
 
 Minibwa is designed for mapping short reads and accurate long reads. It does
 not support spliced alignment and has not been tuned for aligning long contigs.
-For now, minibwa does not properly work with alternate contigs in the reference
-genome. Please use a version of the reference without such contigs.
+Alternate contigs are supported: when a `<idx>.alt` file sits beside the index
+it is loaded automatically and ALT hits are reconciled with their primary
+counterparts, so an ALT twin no longer collapses the primary's mapping quality.
+Pass `--no-alt` to ignore it and align exactly as if no ALT file existed.
 
 ### Installation
 
@@ -130,7 +132,6 @@ include GPL'd source code.
 
 * Minibwa does not work with noisy long reads or spliced RNA-seq reads.
 * Minibwa does not support undirectional bisulfite sequencing data.
-* Minibwa does not recognize alternate haplotypes.
 
 [apache2]: https://github.com/lh3/minibwa/tree/Apache2
 [zlib]: https://zlib.net/

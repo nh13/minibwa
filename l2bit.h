@@ -29,6 +29,9 @@ typedef struct {
 	char *cat_name, *cat_comm;
 	void *mmap; // mmap pointer
 	size_t mmap_len; // mmap length (for munmap)
+	int64_t *ctg_bucket; // ctg_bucket[p>>bucket_shift] = first contig whose end exceeds (p>>bucket_shift)<<bucket_shift
+	int bucket_shift;
+	uint64_t n_bucket;
 } l2b_t;
 
 #ifdef __cplusplus

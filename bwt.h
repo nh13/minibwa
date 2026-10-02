@@ -58,6 +58,11 @@ mb_bwt_t *mb_bwt_load(const char *fn);
 mb_bwt_t *mb_bwt_load_mmap(const char *fn, int preload);
 mb_bwt_t *mb_bwt_init_from_raw(int is_byte, const void *raw_, uint64_t len, uint64_t primary);
 
+#define MB_SA_MAGIC "MSA\1"   /* 4 bytes: 'M','S','A',0x01 */
+int         mb_bwt_save_sa(const char *fn, const mb_bwt_t *bwt);   /* write sidecar from bwt->sa/sa_bit/n_sa */
+int         mb_bwt_load_sa(mb_bwt_t *bwt, const char *fn);          /* attach sidecar SA to a loaded BWT (0=ok) */
+mb_bwt_t   *mb_bwt_load_nosa(const char *fn);                      /* heap-load BWT only; sa_bit=-1, sa=NULL, n_sa=0 */
+
 void mb_bwt_cache(mb_bwt_t *bwt, int32_t len);
 uint64_t mb_bwt_rank11(const mb_bwt_t *bwt, uint64_t k, uint8_t c);
 void mb_bwt_rank1a(const mb_bwt_t *bwt, uint64_t k, uint64_t cnt[4]);

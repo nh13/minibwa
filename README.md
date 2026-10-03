@@ -1,17 +1,6 @@
 
 <!-- DISTRO:BEGIN -->
-## ⚡ Faster than stock — and ALT-aware
-
-Fully-engaged **nh13/minibwa** vs stock **lh3/minibwa** — same reads, same reference, same compiler:
-
-| workload | arm64 (Graviton4) | x86 (AVX-512) |
-|---|---|---|
-| short reads (WGS / WES / panel) | **up to 1.23× faster** | up to 1.08× |
-| long reads (HiFi / ONT) | up to 1.16× | **up to 1.26× faster** |
-| Hi-C | up to 1.09× | up to 1.02× |
-| ALT-shadowed reads placed confidently | **6.1× more than stock** | **6.1× more than stock** |
-
-<sub>Whole-distribution defaults vs stock lh3/minibwa · hs38DH · <code>-t 16</code>, 2 reps · lh3 has no ALT handling · output byte-identical to upstream except where a feature is engaged (≥99.95% concordance) · measured 2026-09-06.</sub>
+> ⚡ **Benchmark numbers are hidden pending re-measurement** — the distribution's feature set has changed since they were last measured (2026-09-06).
 
 > **This is a downstream build of [lh3/minibwa](https://github.com/lh3/minibwa).**
 > It carries changes upstream declined, plus a few not yet offered. Upstream remains the source
@@ -33,6 +22,7 @@ Fully-engaged **nh13/minibwa** vs stock **lh3/minibwa** — same reads, same ref
 | `single-copy-parser` | — | unsubmitted | identical | read FASTQ records with a single copy instead of two; 0.67-1.24 pp whole-stack ladder increment |
 | `index-threads-v2` | — | unsubmitted | identical | parallelize the SA-to-BWT pipeline (OpenMP, gated on the existing LIBSAIS_OPENMP probe) |
 | `extd2-avx512` | [lh3/minibwa#20](https://github.com/lh3/minibwa/pull/20) | open | identical | AVX2/AVX-512 ksw_extd2 with runtime dispatch; pays on HiFi/ONT |
+| `radix-key-width` | — | unsubmitted | identical | right-size klib radix key widths -- 5-byte genome-coordinate and 4-byte int32 chain-score sorts; byte-identical, 1.5-4.9x per-sort but <~1% of map CPU |
 | `inline-appenders` | [lh3/minibwa#32](https://github.com/lh3/minibwa/pull/32) | rejected | identical | format SAM/PAF records with inline appenders; with parallel-encode worth +3.7 pp at the default -K on wgs-1M but ~0 above ~10M pairs (input-size dependent, see notes) |
 | `parallel-encode` | [lh3/minibwa#33](https://github.com/lh3/minibwa/pull/33) | open | identical | format SAM/PAF in the mapping step instead of the output thread; relocates work rather than removing it, so it pays only on inputs small enough to be starvation-bound |
 | `meth-cleanups` | [lh3/minibwa#19](https://github.com/lh3/minibwa/pull/19) | rejected | identical | a --meth CI test; documents the mb_align1_inv strand flip and b_ts (comments only) |

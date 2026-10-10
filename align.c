@@ -336,12 +336,12 @@ static void mb_align_pair(void *km, const mb_opt_t *opt, int qlen, const uint8_t
 		ksw_flag |= KSW_EZ_GENERIC_SC;
 	if ((ksw_flag & KSW_EZ_EXTZ_ONLY) && tlen >= qlen) { // ungapped extension
 		ksw_reset_extz(ez);
-		for (j = 0, ez->score = ez->max = 0; j < qlen; ++j) {
+		for (j = 0, ez->score = ez->max = n_mm = 0; j < qlen; ++j) {
 			ez->score += mat[tseq[j] * 5 + qseq[j]];
 			n_mm += (tseq[j] > 3 || qseq[j] > 3 || mat[tseq[j] * 5 + qseq[j]] < 0);
 			if (ez->max < ez->score) ez->max = ez->score, ez->max_q = ez->max_t = j;
 		}
-		if (n_mm <= 2) {
+		if (n_mm <= 1) {
 			ez->mqe = ez->score, ez->mqe_t = qlen - 1;
 			if (ez->mqe + eff_end_bonus >= ez->max) {
 				ez->reach_end = 1;
@@ -352,7 +352,7 @@ static void mb_align_pair(void *km, const mb_opt_t *opt, int qlen, const uint8_t
 	} else if (qlen == tlen && !(ksw_flag & KSW_EZ_EXTZ_ONLY)) { // ungapped alignment
 		int32_t max_gapped_score = (qlen - 2) * opt->a - 2 * (opt->q + opt->e);
 		ksw_reset_extz(ez);
-		for (j = 0, ez->score = 0; j < qlen; ++j) {
+		for (j = 0, ez->score = n_mm = 0; j < qlen; ++j) {
 			ez->score += mat[tseq[j] * 5 + qseq[j]];
 			n_mm += (tseq[j] > 3 || qseq[j] > 3 || mat[tseq[j] * 5 + qseq[j]] < 0);
 		}

@@ -54,7 +54,7 @@ static uint64_t *mb_chain_backtrack(void *km, int64_t n, const int32_t *f, const
 	z = Kmalloc(km, mb128_t, n_z);
 	for (i = 0, k = 0; i < n; ++i) // populate z[]
 		if (f[i] >= min_sc) z[k].x = f[i], z[k++].y = i;
-	radix_sort_mb128x(z, z + n_z);
+	radix_sort_mb128x_b4(z, z + n_z);
 
 	memset(t, 0, n * 4);
 	for (k = n_z - 1, n_v = n_u = 0; k >= 0; --k) { // precompute n_u
@@ -115,7 +115,7 @@ static mb_anchor_t *compact_a(void *km, const l2b_t *l2b, int32_t n_u, uint64_t 
 		w[i].y = (uint64_t)k<<32 | i;
 		k += (int32_t)u[i];
 	}
-	radix_sort_mb128x(w, w + n_u);
+	radix_sort_mb128x_b5(w, w + n_u);
 	u2 = Kmalloc(km, uint64_t, n_u);
 	for (i = k = 0; i < n_u; ++i) {
 		int32_t j = (int32_t)w[i].y, n = (int32_t)u[j];

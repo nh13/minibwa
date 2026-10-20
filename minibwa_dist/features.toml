@@ -199,6 +199,14 @@ negative = "align the chrM fixture with a stock (non-B2) build; SAM must be byte
 summary = "compile-optional cp_occ (bwa-mem2/mem3 FM-index) seeding backend (make B2=1); ~5-12% faster at matched density, differs from native for ~0.05% of reads (MAPQ-0 multimappers)"
 upstream = { status = "unsubmitted" }
 
+[[feature]]
+name = "sa-batch-128"
+branch = "perf/sa-batch-128"
+required = false
+output = "identical"
+summary = "raise the SA-lookup batch depth in mb_anchor 20 -> 128 so more SA walks overlap; +1.9% WGS / +3.9% HiFi on arm64, +0.5% on x86 AVX2"
+upstream = { status = "unsubmitted" }
+
 # --- the hub: touches 9 shared files, merges last, never blocks the build ---
 [[feature]]
 name = "alt-liftgroup"

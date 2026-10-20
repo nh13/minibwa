@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   assemble:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,7 +234,7 @@ jobs:
           NUM=$(gh pr list --head dist-next --base dist --state open \
                   --json number --jq '.[0].number // empty')
           if [ -n "$NUM" ]; then
-            gh pr edit "$NUM" --body "$BODY"
+            gh pr edit "$NUM" --title "sync: upstream ${UPSTREAM_SHA}" --body "$BODY"
           else
             gh pr create --head dist-next --base dist \
               --title "sync: upstream ${UPSTREAM_SHA}" --body "$BODY"

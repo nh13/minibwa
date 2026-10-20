@@ -30,7 +30,7 @@ defaults:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # workflow_dispatch inputs are attacker-controllable text (anyone who can
     # trigger the workflow chooses them) and this job holds contents: write --

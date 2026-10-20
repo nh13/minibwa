@@ -188,9 +188,26 @@ increments the revision: `v0.6-nh13.2`.
 gh workflow run distro-release.yml --repo nh13/minibwa -f upstream_tag=v0.6 -f revision=1
 ```
 
+Upstream often moves past its last tag without cutting a new one (`r427` landed six commits after
+`v0.7`). To release such a `dist`, pass the upstream commit it was assembled on — `.base` in
+`dist-manifest.json` on `dist` — instead of a tag:
+
+```sh
+gh workflow run distro-release.yml --repo nh13/minibwa -f base_sha=74bdd48 -f revision=1
+```
+
+That publishes `v0.7-r427-nh13.1`: upstream's own `MB_VERSION` at that commit (`0.7-r427-dirty`,
+with `-dirty` dropped), then `-nh13.N`. It sorts after every `v0.7-nh13.N` and before
+`v0.8-nh13.1`. The job refuses a sha that is not `dist`'s recorded base, is not on lh3 master,
+is itself a tag (use `upstream_tag`), or whose `MB_VERSION` names a different `maj.min` than the
+nearest tag (it would mis-sort). The stock comparison is built from that exact commit, and the
+upstream half of the notes is lh3's commit log since the nearest tag. `rNNN` is hand-maintained
+and has gaps, so read it as a label rather than a count.
+
 The job builds, gates and verifies the version string **before** it creates the tag — a tag on an
-unverified commit is worse than no release. Release notes are upstream's, plus the feature table,
-plus any feature dropped from that build (read back from `dist-manifest.json`, which every `dist`
+unverified commit is worse than no release. It also checks that the tag does not exist yet before
+building; a re-cut bumps `revision`. Release notes are upstream's, plus the feature table, plus
+any feature dropped from that build (read back from `dist-manifest.json`, which every `dist`
 commit carries).
 
 `MB_VERSION` carries the downstream identity into the SAM `@PG VN:` tag, so any output file is

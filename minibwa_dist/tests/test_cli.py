@@ -443,6 +443,83 @@ def test_notes_render_the_dropped_section(
     assert "not included" in out.lower() and "`a`" in out
 
 
+def test_notes_render_an_untagged_base(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest = _write_manifest(tmp_path, _feature_toml("a"))
+    upstream = tmp_path / "upstream.md"
+    upstream.write_text("- r427: fixed a bug (74bdd48)")
+    sha = "74bdd485f2517fdd322faa1fd8eb36ecf297743d"
+
+    rc = main(
+        [
+            "--manifest",
+            str(manifest),
+            "notes",
+            "--upstream-notes",
+            str(upstream),
+            "--upstream-tag",
+            "v0.7",
+            "--upstream-ref",
+            sha,
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"/commit/{sha}" in out and "since v0.7" in out
+
+
+def test_upstream_version_prints_the_version_at_a_rev(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.7-r427-dirty"\n', "r427")
+    manifest = _write_manifest(tmp_path, "")
+
+    rc = main(
+        [
+            "--manifest",
+            str(manifest),
+            "upstream-version",
+            "--repo",
+            str(repo),
+            "--rev",
+            "HEAD",
+            "--nearest-tag",
+            "v0.7",
+        ]
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().out == "0.7-r427\n"
+
+
+def test_upstream_version_exits_nonzero_on_a_maj_min_mismatch(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The workflow captures stdout with `$(...)`; a failure must be an exit
+    code, not a version string that happens to be wrong.
+    """
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.8-r430-dirty"\n', "bump early")
+    manifest = _write_manifest(tmp_path, "")
+
+    rc = main(
+        [
+            "--manifest",
+            str(manifest),
+            "upstream-version",
+            "--repo",
+            str(repo),
+            "--rev",
+            "HEAD",
+            "--nearest-tag",
+            "v0.7",
+        ]
+    )
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and "nearest upstream tag" in captured.err
+
+
 def test_docs_writes_the_readme_block_and_the_graveyard(tmp_path: Path) -> None:
     manifest = _write_manifest(tmp_path, _feature_toml("a"))
     readme = tmp_path / "README.md"

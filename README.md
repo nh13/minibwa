@@ -32,6 +32,7 @@
 | `sa-default-u3` | — | unsubmitted | identical | default the SA sample rate to 1/8 (-u 3); ~5-6% faster mapping for ~+3 GB RAM on hg38, all native densities byte-identical |
 | `sa-regime-picker` | — | unsubmitted | identical | --index-regime picker with auto speed/memory selection over byte-identical native SA densities (--index-mem, --list-regimes) |
 | `cp-occ-backend` | — | unsubmitted | conditional | compile-optional cp_occ (bwa-mem2/mem3 FM-index) seeding backend (make B2=1); ~5-12% faster at matched density, differs from native for ~0.05% of reads (MAPQ-0 multimappers) |
+| `sa-batch-128` | — | unsubmitted | identical | raise the SA-lookup batch depth in mb_anchor 20 -> 128 so more SA walks overlap; +1.9% WGS / +3.9% HiFi on arm64, +0.5% on x86 AVX2 |
 | `alt-liftgroup` | — | unsubmitted | conditional | ALT-aware mapping via post-extension liftover groups |
 <!-- DISTRO:END -->
 

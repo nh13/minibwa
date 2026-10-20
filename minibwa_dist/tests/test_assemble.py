@@ -15,6 +15,7 @@ from minibwa_dist.assemble import (
     regressions,
     set_version,
     stamp_dev_version,
+    upstream_version,
 )
 from minibwa_dist.manifest import Feature, Manifest, Upstream
 from minibwa_dist.tests.conftest import (
@@ -423,6 +424,41 @@ def test_set_version_refuses_a_header_without_the_define(repo: Path) -> None:
     (repo / "minibwa.h").write_text("#define OTHER 1\n")
     with pytest.raises(RuntimeError, match="MB_VERSION"):
         set_version(repo, "0.6-nh13.1")
+
+
+def test_upstream_version_strips_the_dirty_suffix(repo: Path) -> None:
+    """Between releases lh3's header reads `0.7-r427-dirty`; the suffix describes
+    his working tree, not this build, and must not reach a release tag.
+    """
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.7-r427-dirty"\n', "r427")
+
+    assert upstream_version(repo, "HEAD", "v0.7") == "0.7-r427"
+
+
+def test_upstream_version_reads_the_given_rev_not_the_worktree(repo: Path) -> None:
+    """The release job runs from `dist`, whose header the sync has already
+    restamped; the upstream version must come from the base commit itself.
+    """
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.7-r427-dirty"\n', "r427")
+    base = run(repo, "rev-parse", "HEAD")
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.7-nh13.dev+abc1234"\n', "stamp")
+
+    assert upstream_version(repo, base) == "0.7-r427"
+
+
+def test_upstream_version_refuses_an_unexpected_shape(repo: Path) -> None:
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.7-nh13.dev+abc1234"\n', "stamped")
+    with pytest.raises(RuntimeError, match="not <maj>.<min>-r<N>"):
+        upstream_version(repo, "HEAD")
+
+
+def test_upstream_version_refuses_a_maj_min_ahead_of_the_nearest_tag(repo: Path) -> None:
+    """`0.8-r430` after `v0.7` would name a release that sorts above a later
+    real `v0.8-nh13.1`.
+    """
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.8-r430-dirty"\n', "bump early")
+    with pytest.raises(RuntimeError, match="nearest upstream tag is v0.7"):
+        upstream_version(repo, "HEAD", "v0.7")
 
 
 # --- regression detection: a feature that merged yesterday and does not today ---

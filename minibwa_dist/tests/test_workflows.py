@@ -260,12 +260,13 @@ def test_the_release_lineage_guard_compares_the_recorded_assembly_base() -> None
     Mutation this guards: the mismatch branch's `exit 1` is dropped, so a
     `dist` assembled from the wrong base would release anyway.
     """
-    step = yaml_lite.step(
-        _release(), "release", name="Confirm dist was assembled from this exact upstream tag"
+    text = _run(
+        _release(), "release", "Confirm dist was assembled from the requested upstream commit"
     )
-    text = step.get("run")
-    assert isinstance(text, str)
-    assert "merge-base --is-ancestor" not in _executable(text)
+    # The untagged path does ask `--is-ancestor "$BASE" upstream/master` -- a
+    # different question (is the base on lh3 master at all). What must not come
+    # back is ancestry of the tag standing in for equality with it.
+    assert 'merge-base --is-ancestor "$TAG"' not in _executable(text)
     assert "jq -r '.base // empty' dist-manifest.json" in text
     assert 'git rev-parse "${TAG}^{commit}"' in text
     assert '[ "$BASE" = "$TAG_SHA" ]' in text
@@ -286,6 +287,117 @@ def test_the_release_lineage_guard_compares_the_recorded_assembly_base() -> None
     )
     assert result.returncode == 1, (
         f"a base/tag mismatch must fail the release: rc={result.returncode}, {result.stderr}"
+    )
+
+
+_UNTAGGED_GIT_STUB = """
+case "$1" in
+  fetch|remote) exit 0 ;;
+  rev-parse) echo "${WANT_STUB:?}"; exit 0 ;;
+  merge-base) exit "${MERGE_BASE_EXIT:-0}" ;;
+  describe)
+    case "$*" in
+      *--exact-match*) [ -n "${EXACT_TAG:-}" ] && { echo "$EXACT_TAG"; exit 0; }; exit 128 ;;
+      *) echo v0.7; exit 0 ;;
+    esac ;;
+  *) echo "unexpected git $*" >&2; exit 99 ;;
+esac
+"""
+
+
+def _untagged_lineage(**env: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run the lineage step on the untagged (`base_sha`) path against stubs, and
+    return the result plus what it wrote to `$GITHUB_ENV`.
+    """
+    script = _run(
+        _release(), "release", "Confirm dist was assembled from the requested upstream commit"
+    )
+    github_env = _mktemp_path()
+    base = "a" * 40
+    result = _sh(
+        script,
+        stubs={
+            "git": _UNTAGGED_GIT_STUB,
+            "python": 'case "$*" in *upstream-version*) echo "${PY_VERSION-0.7-r427}"; '
+            'exit "${PY_EXIT:-0}" ;; esac; exit 99',
+        },
+        cwd_files={"dist-manifest.json": json.dumps({"base": base})},
+        extra_env={
+            "TAG": "",
+            "BASE_SHA": base[:7],
+            "WANT_STUB": base,
+            "GITHUB_ENV": str(github_env),
+            **env,
+        },
+    )
+    written = github_env.read_text()
+    github_env.unlink(missing_ok=True)
+    return result, written
+
+
+def test_the_untagged_release_path_exports_the_upstream_version() -> None:
+    result, written = _untagged_lineage()
+    lines = written.splitlines()
+    assert result.returncode == 0, result.stderr
+    assert "VERSION_BASE=0.7-r427" in lines
+    assert "NEAREST_TAG=v0.7" in lines
+    assert "STOCK_REF=" + "a" * 40 in lines, (
+        "the stock comparator must be the exact commit dist was merged onto"
+    )
+    assert "UPSTREAM_REF=" + "a" * 40 in lines
+
+
+def test_the_untagged_release_path_refuses_a_base_the_operator_did_not_name() -> None:
+    """`dist` can be re-shipped between review and dispatch; the release must
+    be of the commit the operator saw.
+    """
+    result, _ = _untagged_lineage(WANT_STUB="b" * 40)
+    assert result.returncode == 1, result.stderr
+
+
+def test_the_untagged_release_path_refuses_a_base_off_upstream_master() -> None:
+    result, _ = _untagged_lineage(MERGE_BASE_EXIT="1")
+    assert result.returncode == 1, result.stderr
+    assert "not on lh3/minibwa master" in result.stderr
+
+
+def test_the_untagged_release_path_refuses_a_base_that_is_a_tag() -> None:
+    """One commit, one tag family: a tagged base must release as v<tag>-nh13.N."""
+    result, _ = _untagged_lineage(EXACT_TAG="v0.7")
+    assert result.returncode == 1, result.stderr
+    assert "upstream_tag=v0.7" in result.stderr
+
+
+def test_the_untagged_release_path_propagates_a_version_mismatch() -> None:
+    """`upstream-version` fails on a `maj.min` ahead of the nearest tag; a
+    failure inside `$(...)` must still stop the step.
+    """
+    result, written = _untagged_lineage(PY_VERSION="", PY_EXIT="1")
+    assert result.returncode == 1, result.stderr
+    assert "VERSION_BASE" not in written
+
+
+def test_the_release_refuses_a_tag_that_already_exists_before_building() -> None:
+    """A collision found by `git tag` after a 20-minute build is a wasted run;
+    a network failure must not read as "no such tag".
+    """
+    script = _run(_release(), "release", "Stamp the version")
+    stubs = {
+        "git": 'case "$1" in ls-remote) exit "${LS_EXIT:?}" ;; *) exit 0 ;; esac',
+        "python": "exit 99",
+    }
+    env = {"VERSION_BASE": "0.7-r427", "REV": "1"}
+
+    exists = _sh(script, stubs=stubs, extra_env={**env, "LS_EXIT": "0"})
+    assert exists.returncode == 1 and "already exists" in exists.stderr
+
+    failed = _sh(script, stubs=stubs, extra_env={**env, "LS_EXIT": "128"})
+    assert failed.returncode == 128, failed.stderr
+
+    absent = _sh(script, stubs=stubs, extra_env={**env, "LS_EXIT": "2"})
+    assert absent.returncode == 99, (
+        "an absent tag must fall through to the stamp command: "
+        f"rc={absent.returncode}, {absent.stderr}"
     )
 
 
@@ -374,7 +486,7 @@ def test_the_release_gate_step_scopes_coverage_and_propagates_a_failure() -> Non
         script,
         stubs=stubs,
         cwd_executables={"minibwa": 'echo "$VERSION"'},
-        extra_env={"VERSION": "9.9.9-test", "TAG": "v0.6"},
+        extra_env={"VERSION": "9.9.9-test", "STOCK_REF": "v0.6"},
     )
 
     assert result.returncode == 1, (
@@ -404,24 +516,37 @@ def test_the_release_validates_its_dispatch_inputs() -> None:
     them to env to keep them out of the Actions template, then feeds them to a
     version string, a filename and `git tag`.
 
-    Mutation this guards: both `case` arms stop exiting and just echo instead
-    -- so a `$REV`/`$TAG` that fails validation would sail through to `git
-    tag` anyway. Each arm is exercised on its own bad input, with the other
-    input held valid, so a mutation in either one is caught on its own.
+    Mutation this guards: any validation arm stops exiting and just echoes
+    instead -- so a `$REV`/`$TAG`/`$BASE_SHA` that fails validation would sail
+    through to `git tag` anyway. Each arm is exercised on its own bad input,
+    with the other inputs held valid, so a mutation in any one is caught.
     """
     script = _run(_release(), "release", "Validate the dispatch inputs")
     # Whitespace-tolerant, not a literal substring: incidental spacing around
     # `in` is not the thing under test, the patterns themselves are.
     assert re.search(r"case \"\$REV\" in\s+''\|\*\[!0-9\]\*\)", script)
-    assert re.search(r"case \"\$TAG\" in\s+''\|\*\[!A-Za-z0-9\._-\]\*\)", script)
+    assert re.search(r"case \"\$TAG\" in\s+\*\[!A-Za-z0-9\._-\]\*\)", script)
+    assert re.search(r"case \"\$BASE_SHA\" in\s+\*\[!0-9a-f\]\*\)", script)
 
-    bad_rev = _sh(script, stubs={}, extra_env={"REV": "not-a-number", "TAG": "v0.6"})
+    sha = {"REV": "1", "TAG": "", "BASE_SHA": "74bdd48"}
+    assert _sh(script, stubs={}, extra_env=sha).returncode == 0, "a short sha is valid"
+    both = {**sha, "TAG": "v0.6"}
+    assert _sh(script, stubs={}, extra_env=both).returncode != 0, "tag and sha together"
+    neither = {**sha, "BASE_SHA": ""}
+    assert _sh(script, stubs={}, extra_env=neither).returncode != 0, "no base at all"
+    for bad in ("74BDD48", "74bd", "74bdd48;x", "a" * 41):
+        env = {**sha, "BASE_SHA": bad}
+        assert _sh(script, stubs={}, extra_env=env).returncode != 0, f"bad sha {bad!r}"
+
+    bad_rev = _sh(
+        script, stubs={}, extra_env={"REV": "not-a-number", "TAG": "v0.6", "BASE_SHA": ""}
+    )
     assert bad_rev.returncode != 0, "a non-numeric revision must fail validation"
 
-    bad_tag = _sh(script, stubs={}, extra_env={"REV": "1", "TAG": "v0.6; rm -rf /"})
+    bad_tag = _sh(script, stubs={}, extra_env={"REV": "1", "TAG": "v0.6; rm -rf /", "BASE_SHA": ""})
     assert bad_tag.returncode != 0, "a tag with disallowed characters must fail validation"
 
-    both_valid = _sh(script, stubs={}, extra_env={"REV": "1", "TAG": "v0.6"})
+    both_valid = _sh(script, stubs={}, extra_env={"REV": "1", "TAG": "v0.6", "BASE_SHA": ""})
     assert both_valid.returncode == 0, "valid inputs must not be rejected"
 
 

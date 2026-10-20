@@ -19,6 +19,7 @@ from minibwa_dist.assemble import (
     regressions,
     set_version,
     stamp_dev_version,
+    upstream_version,
 )
 from minibwa_dist.gates import run_gates
 from minibwa_dist.gitutil import GitError
@@ -180,9 +181,23 @@ def _notes(args: argparse.Namespace) -> int:
     dropped = tuple(args.dropped) if args.dropped else ()
     print(
         render_release_notes(
-            manifest, Path(args.upstream_notes).read_text(), args.upstream_tag, dropped
+            manifest,
+            Path(args.upstream_notes).read_text(),
+            args.upstream_tag,
+            dropped,
+            upstream_ref=args.upstream_ref,
         )
     )
+    return 0
+
+
+def _upstream_version(args: argparse.Namespace) -> int:
+    """Print upstream's version at an untagged commit, for the release workflow."""
+    try:
+        print(upstream_version(Path(args.repo), args.rev, args.nearest_tag))
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -240,11 +255,32 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("notes", help="render release notes")
     p.add_argument("--upstream-notes", required=True, help="file holding upstream's own notes")
-    p.add_argument("--upstream-tag", required=True, help="upstream tag being mirrored, e.g. v0.6")
+    p.add_argument(
+        "--upstream-tag",
+        required=True,
+        help="upstream tag being mirrored, e.g. v0.6; with --upstream-ref, the last tag before it",
+    )
+    p.add_argument(
+        "--upstream-ref",
+        default=None,
+        help="full sha of the untagged upstream commit this build is of",
+    )
     p.add_argument(
         "--dropped", nargs="*", help="feature names excluded from this build, space separated"
     )
     p.set_defaults(func=_notes)
+
+    p = sub.add_parser(
+        "upstream-version", help="print upstream's MB_VERSION at a commit, e.g. 0.7-r427"
+    )
+    p.add_argument("--repo", default=".", help="path to a checkout holding the commit")
+    p.add_argument("--rev", required=True, help="the untagged upstream commit")
+    p.add_argument(
+        "--nearest-tag",
+        default=None,
+        help="the most recent upstream tag before --rev; its maj.min must match",
+    )
+    p.set_defaults(func=_upstream_version)
 
     p = sub.add_parser("docs", help="regenerate README.md block and GRAVEYARD.md")
     p.add_argument("--readme", default="README.md", help="README to rewrite the distro block in")

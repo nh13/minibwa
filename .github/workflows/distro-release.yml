@@ -1,13 +1,20 @@
 name: distro-release
 
-# Mirror an upstream release. Invoked manually with the upstream tag after
-# distro-sync has shipped the matching `dist`.
+# Mirror an upstream release. Invoked manually after distro-sync has shipped the
+# matching `dist`, with exactly one of: the upstream tag `dist` was assembled on,
+# or -- when upstream has moved past its last tag without cutting a new one --
+# the untagged upstream commit `dist` was assembled on.
 on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: "Upstream tag to mirror, e.g. v0.6"
-        required: true
+        description: "Upstream tag to mirror, e.g. v0.6 (or leave empty and give base_sha)"
+        required: false
+        default: ""
+      base_sha:
+        description: "Untagged upstream commit dist was assembled on (or leave empty and give upstream_tag)"
+        required: false
+        default: ""
       revision:
         description: "Downstream revision counter"
         required: true
@@ -30,14 +37,15 @@ defaults:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # workflow_dispatch inputs are attacker-controllable text (anyone who can
     # trigger the workflow chooses them) and this job holds contents: write --
-    # never splice `${{ inputs.* }}` straight into a run: script. Hoist both to
-    # job-level env once here and use "$TAG"/"$REV" everywhere below.
+    # never splice `${{ inputs.* }}` straight into a run: script. Hoist them to
+    # job-level env once here and use "$TAG"/"$BASE_SHA"/"$REV" everywhere below.
     env:
       TAG: ${{ inputs.upstream_tag }}
+      BASE_SHA: ${{ inputs.base_sha }}
       REV: ${{ inputs.revision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,11 +64,25 @@ jobs:
           case "$REV" in ''|*[!0-9]*)
             echo "revision must be a positive integer, got '$REV'" >&2; exit 1;;
           esac
-          case "$TAG" in ''|*[!A-Za-z0-9._-]*)
-            echo "upstream_tag may only contain [A-Za-z0-9._-], got '$TAG'" >&2; exit 1;;
-          esac
+          # Exactly one base: a tag and a sha together would let either one
+          # vouch for a lineage the other never checked.
+          if [ -n "$TAG" ] && [ -n "$BASE_SHA" ] || [ -z "$TAG$BASE_SHA" ]; then
+            echo "give exactly one of upstream_tag or base_sha" >&2; exit 1
+          fi
+          if [ -n "$TAG" ]; then
+            case "$TAG" in *[!A-Za-z0-9._-]*)
+              echo "upstream_tag may only contain [A-Za-z0-9._-], got '$TAG'" >&2; exit 1;;
+            esac
+          else
+            case "$BASE_SHA" in *[!0-9a-f]*)
+              echo "base_sha must be lowercase hex, got '$BASE_SHA'" >&2; exit 1;;
+            esac
+            [ "${#BASE_SHA}" -ge 7 ] && [ "${#BASE_SHA}" -le 40 ] || {
+              echo "base_sha must be 7-40 hex digits, got '$BASE_SHA'" >&2; exit 1
+            }
+          fi
 
-      - name: Confirm dist was assembled from this exact upstream tag
+      - name: Confirm dist was assembled from the requested upstream commit
         # `git merge-base --is-ancestor "$TAG" HEAD` used to stand here, and it
         # passes for precisely the case its own comment claimed to prevent:
         # `dist` is reassembled nightly from upstream master tip, so any dist
@@ -78,12 +100,48 @@ jobs:
           test -f dist-manifest.json || { echo "dist-manifest.json missing from dist" >&2; exit 1; }
           BASE=$(jq -r '.base // empty' dist-manifest.json)
           [ -n "$BASE" ] || { echo "dist-manifest.json records no assembly base" >&2; exit 1; }
-          TAG_SHA=$(git rev-parse "${TAG}^{commit}")
-          [ "$BASE" = "$TAG_SHA" ] || {
-            echo "dist was assembled from ${BASE}, not ${TAG} (${TAG_SHA})" >&2
-            echo "re-run distro-sync with master at ${TAG} before releasing" >&2
-            exit 1
-          }
+          if [ -n "$TAG" ]; then
+            TAG_SHA=$(git rev-parse "${TAG}^{commit}")
+            [ "$BASE" = "$TAG_SHA" ] || {
+              echo "dist was assembled from ${BASE}, not ${TAG} (${TAG_SHA})" >&2
+              echo "re-run distro-sync with master at ${TAG} before releasing" >&2
+              exit 1
+            }
+            NEAREST_TAG="$TAG"
+            VERSION_BASE="${TAG#v}"
+            STOCK_REF="$TAG"
+          else
+            # The operator names the sha they reviewed rather than this job
+            # reading it off `dist`: distro-ship can move `dist` between the
+            # review and the dispatch, and the release must be of what was seen.
+            WANT=$(git rev-parse --verify "${BASE_SHA}^{commit}")
+            [ "$BASE" = "$WANT" ] || {
+              echo "dist was assembled from ${BASE}, not ${BASE_SHA} (${WANT})" >&2
+              exit 1
+            }
+            git merge-base --is-ancestor "$BASE" upstream/master || {
+              echo "${BASE} is not on lh3/minibwa master" >&2; exit 1
+            }
+            # One commit, one tag family: a tagged base releases as v<tag>-nh13.N.
+            if EXACT=$(git describe --tags --exact-match --match 'v[0-9]*' \
+                         --exclude '*-nh13.*' "$BASE" 2>/dev/null); then
+              echo "${BASE} is upstream tag ${EXACT}; dispatch with upstream_tag=${EXACT}" >&2
+              exit 1
+            fi
+            NEAREST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' \
+                            --exclude '*-nh13.*' "$BASE")
+            VERSION_BASE=$(python -m minibwa_dist.cli upstream-version \
+                             --repo . --rev "$BASE" --nearest-tag "$NEAREST_TAG")
+            STOCK_REF="$BASE"
+            echo "UPSTREAM_REF=${BASE}" >> "$GITHUB_ENV"
+          fi
+          # NEAREST_TAG is the tag itself when one was given, else the most
+          # recent upstream tag before BASE -- what the notes are written against.
+          {
+            echo "NEAREST_TAG=${NEAREST_TAG}"
+            echo "VERSION_BASE=${VERSION_BASE}"
+            echo "STOCK_REF=${STOCK_REF}"
+          } >> "$GITHUB_ENV"
 
       - name: Stamp the version
         # The rewrite lives in `minibwa_dist.cli stamp`, which `stamp_dev_version`
@@ -92,7 +150,15 @@ jobs:
         # replacement into which `&` or `/` from $VERSION would have been
         # spliced as sed syntax.
         run: |
-          VERSION="${TAG#v}-nh13.${REV}"
+          VERSION="${VERSION_BASE}-nh13.${REV}"
+          # Fail now rather than after the build: re-cuts bump REV.
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null || rc=$?
+          case "$rc" in
+            0) echo "tag v${VERSION} already exists; bump revision" >&2; exit 1 ;;
+            2) ;;
+            *) echo "git ls-remote failed (exit ${rc})" >&2; exit "$rc" ;;
+          esac
           # MB_VERSION is a single #define at minibwa.h:6 and flows into the SAM
           # @PG VN: tag, so this one line self-identifies every output file.
           # distro-sync already stamped a `.dev+<sha>` value here; this replaces it.
@@ -121,7 +187,7 @@ jobs:
           make -j"$(nproc)"
           make -j"$(nproc)" -C api-test
           ./minibwa version | grep -Fx "${VERSION}"
-          git worktree add /tmp/stock "$TAG"
+          git worktree add /tmp/stock "$STOCK_REF"
           make -C /tmp/stock -j"$(nproc)"
           python -m minibwa_dist.cli gates \
             --candidate ./minibwa --stock /tmp/stock/minibwa \
@@ -132,8 +198,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$TAG" --repo lh3/minibwa \
-            --json body --jq .body > /tmp/upstream-notes.md
+          if [ -n "${UPSTREAM_REF:-}" ]; then
+            # No upstream release to quote for an untagged commit, but lh3's
+            # subjects are his changelog ("r427: fixed a bug when counting mm").
+            git log --reverse --format='- %s (%h)' "${NEAREST_TAG}..${UPSTREAM_REF}" \
+              > /tmp/upstream-notes.md
+          else
+            gh release view "$TAG" --repo lh3/minibwa \
+              --json body --jq .body > /tmp/upstream-notes.md
+          fi
           # The job checked out ref: dist, and distro-sync commits
           # dist-manifest.json onto dist-next (which ships into dist), so read
           # it from the local tree instead of round-tripping through the API.
@@ -141,7 +214,7 @@ jobs:
           DROPPED=$(jq -r '[.dropped[].name] | join(" ")' dist-manifest.json)
           python -m minibwa_dist.cli notes \
             --upstream-notes /tmp/upstream-notes.md \
-            --upstream-tag "$TAG" \
+            --upstream-tag "$NEAREST_TAG" ${UPSTREAM_REF:+--upstream-ref "$UPSTREAM_REF"} \
             ${DROPPED:+--dropped $DROPPED} > /tmp/notes.md
 
       - name: Tag and push

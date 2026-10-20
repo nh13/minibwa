@@ -124,14 +124,38 @@ def render_graveyard(manifest: Manifest) -> str:
 
 
 def render_release_notes(
-    manifest: Manifest, upstream_notes: str, upstream_tag: str, dropped: tuple[str, ...]
+    manifest: Manifest,
+    upstream_notes: str,
+    upstream_tag: str,
+    dropped: tuple[str, ...],
+    *,
+    upstream_ref: str | None = None,
 ) -> str:
-    """Release notes: upstream's own, plus what this distribution adds and omits."""
+    """Release notes: upstream's own, plus what this distribution adds and omits.
+
+    With `upstream_ref`, the build is of an untagged upstream commit and
+    `upstream_tag` is the nearest tag before it. There is no upstream release to
+    quote then, so `upstream_notes` is expected to be the commit log since that
+    tag, and the headings say so.
+    """
+    tag_link = f"[{upstream_tag}](https://github.com/{UPSTREAM}/releases/tag/{upstream_tag})"
+    if upstream_ref is None:
+        header = (
+            f"Downstream build of [{UPSTREAM} {upstream_tag}]"
+            f"(https://github.com/{UPSTREAM}/releases/tag/{upstream_tag})."
+        )
+        heading = "## Upstream release notes"
+    else:
+        header = (
+            f"Downstream build of [{UPSTREAM}@{upstream_ref[:7]}]"
+            f"(https://github.com/{UPSTREAM}/commit/{upstream_ref}), "
+            f"an untagged upstream commit after {tag_link}."
+        )
+        heading = f"## Upstream changes since {upstream_tag}"
     parts = [
-        f"Downstream build of [{UPSTREAM} {upstream_tag}]"
-        f"(https://github.com/{UPSTREAM}/releases/tag/{upstream_tag}).",
+        header,
         "",
-        "## Upstream release notes",
+        heading,
         "",
         upstream_notes,
         "",

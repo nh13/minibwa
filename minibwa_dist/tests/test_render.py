@@ -69,6 +69,29 @@ def test_release_notes_list_dropped_features_loudly() -> None:
     assert "not included" in notes.lower()
 
 
+def test_release_notes_for_an_untagged_base_link_the_commit() -> None:
+    """There is no upstream release page for an untagged commit, so the header
+    must point at the commit and say which tag it follows.
+    """
+    sha = "74bdd485f2517fdd322faa1fd8eb36ecf297743d"
+    notes = render_release_notes(
+        MANIFEST, "- r427: fixed a bug (74bdd48)", "v0.7", (), upstream_ref=sha
+    )
+    assert f"https://github.com/lh3/minibwa/commit/{sha}" in notes
+    assert "lh3/minibwa@74bdd48" in notes
+    assert "## Upstream changes since v0.7" in notes
+    assert "## Upstream release notes" not in notes
+    assert "- r427: fixed a bug (74bdd48)" in notes
+
+
+def test_release_notes_for_a_tag_are_unchanged_by_the_untagged_path() -> None:
+    notes = render_release_notes(MANIFEST, "notes", "v0.6", ())
+    assert notes.startswith(
+        "Downstream build of [lh3/minibwa v0.6](https://github.com/lh3/minibwa/releases/tag/v0.6)."
+    )
+    assert "## Upstream release notes" in notes
+
+
 def test_release_notes_omit_the_dropped_section_when_none() -> None:
     notes = render_release_notes(MANIFEST, "notes", "v0.6", ())
     assert "not included" not in notes.lower()

@@ -326,6 +326,39 @@ def set_version(repo: Path, version: str) -> str:
     return current.group(1)
 
 
+_UPSTREAM_VERSION = re.compile(r"^(\d+\.\d+)-r\d+$")
+
+
+def upstream_version(repo: Path, rev: str, nearest_tag: str | None = None) -> str:
+    """Upstream's own version string at `rev`, e.g. `0.7-r427`, for an untagged release.
+
+    Read from MB_VERSION in `rev`'s minibwa.h rather than from a commit subject:
+    the header is the one place lh3 bumps mechanically, while `r427:` in a
+    subject line is free text. Commits between releases carry a `-dirty` suffix
+    (`0.7-r427-dirty`), which is dropped -- it describes upstream's working tree
+    when the header was written, not anything about this build.
+
+    `nearest_tag` guards the ordering the release scheme depends on: an untagged
+    build named `0.7-rNNN` must sort after `v0.7` and before `v0.8`, which holds
+    only while the header's `maj.min` still names the most recent tag. If lh3
+    bumped it ahead of tagging, `v0.8-rNNN-nh13.1` would sort above the real
+    `v0.8-nh13.1` cut later, so refuse instead.
+    """
+    current = _MB_VERSION.search(stdout(repo, "show", f"{rev}:minibwa.h"))
+    if current is None:
+        raise RuntimeError(f"MB_VERSION not found in minibwa.h at {rev}")
+    version = current.group(1).removesuffix("-dirty")
+    shape = _UPSTREAM_VERSION.match(version)
+    if shape is None:
+        raise RuntimeError(f"MB_VERSION at {rev} is {version!r}, not <maj>.<min>-r<N>")
+    if nearest_tag is not None and shape.group(1) != nearest_tag.removeprefix("v"):
+        raise RuntimeError(
+            f"MB_VERSION at {rev} is {version!r} but the nearest upstream tag is "
+            f"{nearest_tag}; an untagged release named after it would mis-sort"
+        )
+    return version
+
+
 def stamp_dev_version(repo: Path, out_branch: str) -> str:
     """Rewrite MB_VERSION on `out_branch` so every dist build identifies itself.
 

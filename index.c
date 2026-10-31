@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdint.h>
 #include "libsais.h"
 #include "libsais64.h"
 #include "kommon.h"
@@ -18,63 +19,53 @@ static ko_longopt_t long_opts[] = { // common long options shared across all ind
 static inline uint8_t l2b_c2t(uint8_t b) { return b == 1? 3 : b; } // C(1) -> T(3)
 static inline uint8_t l2b_g2a(uint8_t b) { return b == 2? 0 : b; } // G(2) -> A(0)
 
-// invert the suffix array a[] (32- or 64-bit) to the BWT in seq[], sample the SSA and drop the primary ($); return the primary
-static int64_t sa_to_bwt(void *a, int use_int32, uint8_t *seq, int64_t len, int sa_bit, uint64_t *ssa)
+// Base at position `in` of the (possibly meth-converted) concatenated reference.
+// Non-meth: forward copy then its reverse complement. Meth: c2t_f, g2a_f, g2a_r,
+// c2t_r. Shared by the parallel seq fill and the parallel BWT inversion so the
+// two stay byte-for-byte consistent with the previous serial fill.
+static inline uint8_t l2b_seqbase(const l2b_t *l2b, int is_meth, int both_strand, int64_t n_fwd, int64_t in)
 {
-	int32_t *a32 = a;
-	int64_t *a64 = a, i, primary = -1;
-	uint64_t mask = (1ULL<<sa_bit) - 1;
-	for (i = 0; i <= len; ++i) {
-		int64_t v = use_int32? a32[i] : a64[i];
-		if ((i & mask) == 0) ssa[i>>sa_bit] = v;
-		if (v == 0) primary = i;
-		else if (use_int32) a32[i] = seq[v - 1];
-		else a64[i] = seq[v - 1];
-	}
-	ssa[0] = (uint64_t)-1;
-	for (i = 0; i < primary; ++i) seq[i] = use_int32? a32[i] : a64[i];
-	for (; i < len; ++i) seq[i] = use_int32? a32[i+1] : a64[i+1];
-	return primary;
+	if (!is_meth)
+		return (both_strand && in >= n_fwd)? 3 - l2b_get0(l2b, 2*n_fwd - 1 - in) : l2b_get0(l2b, in);
+	if (in < n_fwd)        return l2b_c2t(l2b_get0(l2b, in));                    // c2t forward
+	else if (in < 2*n_fwd) return l2b_g2a(l2b_get0(l2b, in - n_fwd));            // g2a forward
+	else if (in < 3*n_fwd) return 3 - l2b_g2a(l2b_get0(l2b, 3*n_fwd - 1 - in));  // g2a reverse
+	else                   return 3 - l2b_c2t(l2b_get0(l2b, 4*n_fwd - 1 - in));  // c2t reverse
 }
 
+// Build the FM-index from the libsais suffix array, parallelised across threads
+// when compiled with -DLIBSAIS_OPENMP (no-op otherwise). Pipeline: parallel seq
+// fill -> libsais -> free seq -> fused SSA sampling + BWT inversion (reads bases
+// via l2b so seq[] is already gone) -> compact the wide SA to one byte per BWT
+// char -> mb_bwt_init_from_inverted_sa. A 32-bit suffix array is used when the
+// concatenated length fits in int32_t, halving SA memory and bandwidth. The
+// output is byte-identical to the serial mb_bwt_init_from_raw path for any
+// thread count.
 static mb_bwt_t *mb_bwt_libsais(const l2b_t *l2b, int sa_bit, int both_strand, int is_meth, int n_thread)
 {
 	const int fs = 10000;
-	uint8_t *seq;
-	int64_t i, j, primary, len;
+	uint8_t *seq, *bwt_byte;
+	int64_t primary, len, n_fwd;
 	mb_bwt_t *bwt;
-	uint64_t *ssa, n_ssa;
+	uint64_t *ssa, n_ssa, mask;
 	void *a;
 	int use_int32;
 
-	len = l2b->tot_len * (is_meth? 2 : 1) * (both_strand? 2 : 1);
+	n_fwd = l2b->tot_len;
+	len = n_fwd * (is_meth? 2 : 1) * (both_strand? 2 : 1);
 	// use a 32-bit suffix array (half the memory) when the concatenated length fits in int32_t
 	use_int32 = (len + fs + 1 <= INT32_MAX);
+
 	seq = kom_malloc(uint8_t, len);
-	if (use_int32) a = kom_malloc(int32_t, len + fs + 1);
-	else a = kom_malloc(int64_t, len + fs + 1);
-	if (is_meth) {
-		// c2t forward
-		for (i = 0, j = 0; i < l2b->tot_len; ++i, ++j)
-			seq[j] = l2b_c2t(l2b_get0(l2b, i));
-		// g2a forward
-		for (i = 0; i < l2b->tot_len; ++i, ++j)
-			seq[j] = l2b_g2a(l2b_get0(l2b, i));
-		if (both_strand) {
-			// g2a reverse (reverse complement of g2a converted)
-			for (i = l2b->tot_len - 1; i >= 0; --i, ++j)
-				seq[j] = 3 - l2b_g2a(l2b_get0(l2b, i));
-			// c2t reverse (reverse complement of c2t converted)
-			for (i = l2b->tot_len - 1; i >= 0; --i, ++j)
-				seq[j] = 3 - l2b_c2t(l2b_get0(l2b, i));
-		}
-	} else {
-		for (i = 0, j = 0; i < l2b->tot_len; ++i, ++j)
-			seq[j] = l2b_get0(l2b, i);
-		if (both_strand)
-			for (i = l2b->tot_len - 1; i >= 0; --i, ++j)
-				seq[j] = 3 - l2b_get0(l2b, i);
-	}
+	a = use_int32? (void*)kom_malloc(int32_t, len + fs + 1)
+	             : (void*)kom_malloc(int64_t, len + fs + 1);
+
+#ifdef LIBSAIS_OPENMP
+	#pragma omp parallel for num_threads(n_thread) schedule(static)
+#endif
+	for (int64_t k = 0; k < len; ++k)
+		seq[k] = l2b_seqbase(l2b, is_meth, both_strand, n_fwd, k);
+
 	if (use_int32) {
 		int32_t *a32 = a;
 #ifdef LIBSAIS_OPENMP
@@ -92,15 +83,75 @@ static mb_bwt_t *mb_bwt_libsais(const l2b_t *l2b, int sa_bit, int both_strand, i
 #endif
 		a64[0] = len;
 	}
+	free(seq); // freed early; the fused inversion below reads bases via l2b (4x denser)
 
-	n_ssa = (len + (1<<sa_bit)) >> sa_bit;
-	ssa = kom_calloc(uint64_t, n_ssa);
-	primary = sa_to_bwt(a, use_int32, seq, len, sa_bit, ssa);
+	n_ssa = (len + (1ULL<<sa_bit)) >> sa_bit;
+	ssa = kom_malloc(uint64_t, n_ssa);
+	mask = (1ULL << sa_bit) - 1;
+	primary = -1;
+
+	// Fused SSA sampling + BWT inversion. Reads the BWT character via l2b so
+	// seq[] could be freed above. Exactly one iteration sees a[k]==0 (libsais's
+	// $-marker); the atomic makes that single store well-defined under OpenMP.
+	if (use_int32) {
+		int32_t *a32 = a;
+#ifdef LIBSAIS_OPENMP
+		#pragma omp parallel for num_threads(n_thread) schedule(static)
+#endif
+		for (int64_t k = 0; k <= len; ++k) {
+			int32_t v = a32[k];
+			if (((uint64_t)k & mask) == 0) ssa[(uint64_t)k >> sa_bit] = (uint64_t)(uint32_t)v;
+			if (v == 0) {
+#ifdef LIBSAIS_OPENMP
+				#pragma omp atomic write
+#endif
+				primary = k;
+			} else {
+				a32[k] = l2b_seqbase(l2b, is_meth, both_strand, n_fwd, v - 1);
+			}
+		}
+	} else {
+		int64_t *a64 = a;
+#ifdef LIBSAIS_OPENMP
+		#pragma omp parallel for num_threads(n_thread) schedule(static)
+#endif
+		for (int64_t k = 0; k <= len; ++k) {
+			int64_t v = a64[k];
+			if (((uint64_t)k & mask) == 0) ssa[(uint64_t)k >> sa_bit] = (uint64_t)v;
+			if (v == 0) {
+#ifdef LIBSAIS_OPENMP
+				#pragma omp atomic write
+#endif
+				primary = k;
+			} else {
+				a64[k] = l2b_seqbase(l2b, is_meth, both_strand, n_fwd, v - 1);
+			}
+		}
+	}
+	ssa[0] = (uint64_t)-1;
 	assert(primary != -1);
+
+	// Compact a[] (BWT chars now in the lower 2 bits) into one byte per char,
+	// then free the wide a[] before building the rank dict.
+	bwt_byte = kom_malloc(uint8_t, len + 1);
+	if (use_int32) {
+		int32_t *a32 = a;
+#ifdef LIBSAIS_OPENMP
+		#pragma omp parallel for num_threads(n_thread) schedule(static)
+#endif
+		for (int64_t k = 0; k <= len; ++k) bwt_byte[k] = (uint8_t)(a32[k] & 3);
+	} else {
+		int64_t *a64 = a;
+#ifdef LIBSAIS_OPENMP
+		#pragma omp parallel for num_threads(n_thread) schedule(static)
+#endif
+		for (int64_t k = 0; k <= len; ++k) bwt_byte[k] = (uint8_t)(a64[k] & 3);
+	}
 	free(a);
-	bwt = mb_bwt_init_from_raw(1, seq, len, primary);
+
+	bwt = mb_bwt_init_from_inverted_sa(bwt_byte, len, primary, n_thread);
 	bwt->sa_bit = sa_bit, bwt->n_sa = n_ssa, bwt->sa = ssa;
-	free(seq);
+	free(bwt_byte);
 	return bwt;
 }
 
@@ -290,6 +341,8 @@ int main_index(int argc, char *argv[])
 		else if (c == 902) is_meth = 1;
 	}
 	if (argc - o.ind == 0) return usage_index(stderr, seed, sa_bit, n_thread);
+	if (n_thread < 1) n_thread = 1;
+	kom_assert(sa_bit >= 0 && sa_bit < 32, "-u must be in [0, 31]");
 
 	prefix = o.ind + 1 < argc? argv[o.ind+1] : argv[o.ind];
 	fn_l2b = kom_calloc(char, strlen(prefix) + 10);

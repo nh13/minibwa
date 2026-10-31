@@ -159,7 +159,7 @@ static void mb_pair_hits(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 			p->y = (uint64_t)i << 2 | (uint64_t)h->rev << 1 | r;
 		}
 	}
-	radix_sort_mb128x(pa, pa + n_pa);
+	radix_sort_mb128x_b5(pa, pa + n_pa);
 
 	y[0] = y[1] = y[2] = y[3] = -1;
 	for (i = 0; i < n_pa; ++i) {

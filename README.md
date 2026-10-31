@@ -74,6 +74,15 @@ minibwa index ref.fa prefix  # use a different index prefix instead of ref.fa
 minibwa index -l ref.fa      # use less memory at the cost of performance
 minibwa index --meth ref.fa  # generate BS-seq index
 ```
+
+> **minibwa samples the suffix array at 1/8 by default (`-u 3`).** Mapping is
+> ~12% faster in the mapping phase on hg38 (measured: 1/8 is 1.12× the 1/16
+> map-phase throughput); the index and peak RAM grow by ~3 GB (≈9 → ≈12 GB).
+> Build with `minibwa index -u 4` for the previous 1/16 index (smaller, ~12%
+> slower). Denser than 1/8 (`-u 2`/`-u 1`) is **not** recommended for routine
+> use: the speed gain flattens sharply (≈1.19–1.23×) while RAM grows 2–6×, so
+> the extra memory buys little.
+
 Minibwa generates two files: `ref.fa.l2b` for 2-bit encoded reference genome
 sequences and `ref.fa.mbw` for BWT and sampled suffix array. In the `--meth`
 mode, minibwa additionally generates `ref.fa.meth.mbw` for the BWT of the

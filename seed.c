@@ -267,7 +267,7 @@ static void mb_anchor_split_meth(void *km, const l2b_t *l2b, int32_t min_len, in
  * strategy noticeably improves the performance. */
 double mb_anchor(void *km, const mb_idx_t *idx, mb_sai_v *u, int32_t min_len, int32_t qlen, const uint8_t *qseq, l2b_meth_t mt, int32_t max_occ, mb_anchor_v *v)
 {
-	const int batch_size = 20;
+	const int batch_size = 128; // SA-lookup MLP batch depth, tuned to hide FM-index DRAM latency (128 beat 64 and 20; larger is MSHR-capped)
 	int32_t n_aux, m, m_a;
 	int64_t i, i0, j, k;
 	uint64_t *a;

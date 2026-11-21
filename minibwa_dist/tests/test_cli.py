@@ -142,7 +142,7 @@ def test_sync_with_stamp_produces_the_expected_version_string(
 
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["version"] == f"0.6-nh13.dev+{expected_sha}"
+    assert out["version"] == f"0.6-r416-nh13.dev+{expected_sha}"
     run(repo, "checkout", "-q", "dist-next")
     assert (repo / "minibwa.h").read_text() == f'#define MB_VERSION "{out["version"]}"\n'
 

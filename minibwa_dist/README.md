@@ -211,7 +211,7 @@ any feature dropped from that build (read back from `dist-manifest.json`, which 
 commit carries).
 
 `MB_VERSION` carries the downstream identity into the SAM `@PG VN:` tag, so any output file is
-traceable to the build that produced it. Sync stamps `<upstream>-nh13.dev+<sha>`; release
+traceable to the build that produced it. Sync stamps `<upstream>-nh13.dev+<sha>` (e.g. `0.7-r427-nh13.dev+2d3e83b`); release
 re-stamps the final version.
 
 ## The workflows
@@ -285,7 +285,7 @@ minibwa_dist/
   render.py         generate README.md's block, GRAVEYARD.md, release notes
   cli.py            thin entry points; every real decision lives in a module
   gitutil.py        git subprocess wrapper
-  tests/            106 tests, no network, synthetic git repos in tmp dirs
+  tests/            170+ tests, no network, synthetic git repos in tmp dirs
 ```
 
 Python is **stdlib-only** — no runtime dependencies. Run it with

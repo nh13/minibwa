@@ -327,6 +327,7 @@ def set_version(repo: Path, version: str) -> str:
 
 
 _UPSTREAM_VERSION = re.compile(r"^(\d+\.\d+)-r\d+$")
+_DOWNSTREAM_SUFFIX = re.compile(r"-nh13\..*$")
 
 
 def upstream_version(repo: Path, rev: str, nearest_tag: str | None = None) -> str:
@@ -381,7 +382,12 @@ def stamp_dev_version(repo: Path, out_branch: str) -> str:
     current = _MB_VERSION.search((repo / "minibwa.h").read_text())
     if current is None:
         raise RuntimeError("MB_VERSION not found in minibwa.h")
-    upstream = current.group(1).split("-")[0]
+    # Keep upstream's `-rNNN` so a dev build names the same upstream revision a
+    # release would (`0.7-r427-nh13.dev+<sha>`, not `0.7-nh13.dev+<sha>`). Strip
+    # any earlier stamp first so a re-run does not compound, then upstream's
+    # `-dirty`. Deliberately looser than `upstream_version`: an odd header shape
+    # must not fail an unattended sync, only lose detail in the stamp.
+    upstream = _DOWNSTREAM_SUFFIX.sub("", current.group(1)).removesuffix("-dirty")
     sha = stdout(repo, "rev-parse", "--short", "HEAD")
     version = f"{upstream}-nh13.dev+{sha}"
 

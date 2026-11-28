@@ -347,23 +347,33 @@ def test_stamp_dev_version_rewrites_only_the_version_line(repo: Path) -> None:
 
     version = stamp_dev_version(repo, "master")
 
-    assert version == f"0.6-nh13.dev+{sha}"
+    assert version == f"0.6-r416-nh13.dev+{sha}"
     assert (repo / "minibwa.h").read_text() == header.replace('"0.6-r416"', f'"{version}"'), (
         "everything but the MB_VERSION line must come through byte-identical"
     )
 
 
 def test_stamp_dev_version_does_not_compound_on_a_second_run(repo: Path) -> None:
-    """The already-stamped case must strip back to the bare upstream version first."""
+    """The already-stamped case must strip back to upstream's own version first."""
     header = '#define MB_VERSION "0.6-r416"\n'
     commit_file(repo, "minibwa.h", header, "add header")
 
     first = stamp_dev_version(repo, "master")
     second = stamp_dev_version(repo, "master")
 
-    assert first.startswith("0.6-nh13.dev+") and first.count("-nh13.dev+") == 1
-    assert second.startswith("0.6-nh13.dev+") and second.count("-nh13.dev+") == 1
+    assert first.startswith("0.6-r416-nh13.dev+") and first.count("-nh13.dev+") == 1
+    assert second.startswith("0.6-r416-nh13.dev+") and second.count("-nh13.dev+") == 1
     assert (repo / "minibwa.h").read_text() == f'#define MB_VERSION "{second}"\n'
+
+
+def test_stamp_dev_version_keeps_upstream_rnnn_and_drops_dirty(repo: Path) -> None:
+    """Between releases upstream reads `0.7-r427-dirty`; a dev build must name
+    r427 the way a release of the same base would, without the `-dirty`.
+    """
+    commit_file(repo, "minibwa.h", '#define MB_VERSION "0.7-r427-dirty"\n', "r427")
+    sha = run(repo, "rev-parse", "--short", "HEAD")
+
+    assert stamp_dev_version(repo, "master") == f"0.7-r427-nh13.dev+{sha}"
 
 
 def test_stamp_dev_version_raises_when_mb_version_is_absent(repo: Path) -> None:
@@ -392,7 +402,7 @@ def test_stamp_dev_version_reads_and_writes_only_out_branch(repo: Path) -> None:
 
     version = stamp_dev_version(repo, "dist-next")
 
-    assert version == f"0.6-nh13.dev+{dist_sha}", (
+    assert version == f"0.6-r416-nh13.dev+{dist_sha}", (
         "the embedded sha must identify out_branch's HEAD, not the calling branch's"
     )
     run(repo, "checkout", "-q", "dist-next")
